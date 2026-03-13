@@ -503,9 +503,10 @@ TEST(full_kernel_snippet) {
 
     /* Check some key tokens */
     ASSERT_EQ(toks[0].kind, TOK_KW_MODULE, "module");
-    ASSERT_EQ(toks[1].kind, TOK_IDENTIFIER, "kernel");
+    ASSERT_EQ(toks[1].kind, TOK_KW_KERNEL, "kernel (keyword)");
     ASSERT_EQ(toks[2].kind, TOK_SEMICOLON, ";");
     ASSERT_EQ(toks[3].kind, TOK_KW_IMPORT, "import");
+    ASSERT_EQ(toks[4].kind, TOK_KW_KERNEL, "kernel (keyword in import path)");
 
     free(toks);
     PASS();
