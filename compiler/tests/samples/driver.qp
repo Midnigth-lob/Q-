@@ -1,0 +1,73 @@
+// driver.qp — Sample Q+ driver for lexer testing
+
+module kernel::drivers::keyboard;
+
+import qpstd::collections::ringbuffer { RingBuffer };
+import qpstd::cpu::interrupts { InterruptFrame };
+
+const KB_DATA_PORT: u16 = 0x60;
+const KB_BUFFER_SIZE: usize = 256;
+
+driver PS2Keyboard {
+    buffer: RingBuffer<u8, KB_BUFFER_SIZE>,
+    shift_pressed: bool,
+
+    fn init(self: &mut Self) -> Result<void, DriverError> {
+        self.buffer = RingBuffer::new();
+        self.shift_pressed = false;
+
+        unsafe {
+            port::out_u8(0x64, 0xAE);
+        }
+
+        return Ok(());
+    }
+
+    #[irq_handler]
+    fn irq_handler(self: &mut Self) -> void {
+        let scancode: u8 = unsafe { port::in_u8(KB_DATA_PORT) };
+
+        if scancode & 0x80 != 0 {
+            // Key released
+            match scancode & 0x7F {
+                0x2A | 0x36 => self.shift_pressed = false,
+                _ => {},
+            }
+        } else {
+            // Key pressed
+            match scancode {
+                0x2A | 0x36 => self.shift_pressed = true,
+                _ => {
+                    self.buffer.push(scancode);
+                },
+            }
+        }
+
+        unsafe { port::out_u8(0x20, 0x20); }
+    }
+
+    pub fn read_key(self: &mut Self) -> Option<u8> {
+        return self.buffer.pop();
+    }
+
+    fn shutdown(self: &mut Self) -> void {
+        unsafe { port::out_u8(0x64, 0xAD); }
+    }
+}
+
+syscall sys_write(fd: i32, buf: ptr<u8>, len: usize) -> isize {
+    if not is_userspace_addr(buf, len) {
+        return -14;
+    }
+
+    let kernel_buf: [u8; 4096] = [0; 4096];
+    let copy_len = @saturating(len);
+
+    match current_process().get_fd(fd) {
+        None => return -9,
+        Some(file) => {
+            let written = file.write(&kernel_buf[0..copy_len])?;
+            return written as isize;
+        },
+    }
+}
