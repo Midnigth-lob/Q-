@@ -1,0 +1,35 @@
+{
+    "name": "qplus",
+    "displayName": "Q+ Language Support",
+    "description": "Syntax highlighting and language features for the Q+ OS Programming Language",
+    "version": "0.1.0",
+    "publisher": "QPlusTeam",
+    "engines": {
+        "vscode": "^1.74.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "qplus",
+                "aliases": [
+                    "Q+",
+                    "qplus"
+                ],
+                "extensions": [
+                    ".qp"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "qplus",
+                "scopeName": "source.qplus",
+                "path": "./syntaxes/qplus.tmLanguage.json"
+            }
+        ]
+    }
+}
