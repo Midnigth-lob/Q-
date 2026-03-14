@@ -3,7 +3,7 @@
 # ──────────────────────────────────────────────────────────────
 
 CC       = gcc
-CFLAGS   = -Wall -Wextra -Wno-unused-parameter -std=c11 -Iinclude
+CFLAGS   = -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -std=c11 -Iinclude
 LDFLAGS  =
 
 # Debug/Release
@@ -20,24 +20,28 @@ TEST_DIR  = tests
 BUILD_DIR = build
 OBJ_DIR   = $(BUILD_DIR)/obj
 
-# Source files (compiler)
-SRCS = $(SRC_DIR)/main.c \
-       $(SRC_DIR)/lexer.c \
-       $(SRC_DIR)/source.c \
-       $(SRC_DIR)/diagnostic.c
+# Source files (compiler) — all passes
+SRCS = $(SRC_DIR)/main.c      \
+       $(SRC_DIR)/lexer.c     \
+       $(SRC_DIR)/source.c    \
+       $(SRC_DIR)/diagnostic.c \
+       $(SRC_DIR)/parser.c    \
+       $(SRC_DIR)/sema.c      \
+       $(SRC_DIR)/codegen.c   \
+       $(SRC_DIR)/security.c
 
 # Object files
 OBJS = $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(SRCS))
 
-# Test source files
+# Test source files (lexer test, standalone)
 TEST_SRCS = $(TEST_DIR)/test_lexer.c \
-            $(SRC_DIR)/lexer.c \
-            $(SRC_DIR)/source.c \
+            $(SRC_DIR)/lexer.c       \
+            $(SRC_DIR)/source.c      \
             $(SRC_DIR)/diagnostic.c
 
 TEST_OBJS = $(OBJ_DIR)/test_lexer.o \
-            $(OBJ_DIR)/lexer.o \
-            $(OBJ_DIR)/source.o \
+            $(OBJ_DIR)/lexer.o       \
+            $(OBJ_DIR)/source.o      \
             $(OBJ_DIR)/diagnostic.o
 
 # Output
@@ -79,9 +83,24 @@ clean:
 
 # ── Convenience targets ─────────────────────────────────────
 
-# Lex a sample file
+# Lex sample files
 lex_hello: $(TARGET)
 	$(TARGET) lex tests/samples/hello.qp
 
 lex_driver: $(TARGET)
 	$(TARGET) lex tests/samples/driver.qp
+
+# Parse sample files
+parse_hello: $(TARGET)
+	$(TARGET) parse tests/samples/hello.qp
+
+parse_driver: $(TARGET)
+	$(TARGET) parse tests/samples/driver.qp
+
+# Build (compile) sample files
+build_hello: $(TARGET)
+	$(TARGET) build tests/samples/hello.qp
+
+build_driver: $(TARGET)
+	$(TARGET) build tests/samples/driver.qp
+

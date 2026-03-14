@@ -140,7 +140,7 @@ static AstType *parse_type(Parser *p) {
         return t;
     }
 
-    /* Named type or path type */
+    /* Named type or path type (with optional generic args: T<A, B>) */
     if (check(p, TOK_IDENTIFIER) || check(p, TOK_KW_SELF_TYPE)) {
         StringView name;
         if (check(p, TOK_KW_SELF_TYPE)) {
@@ -152,6 +152,37 @@ static AstType *parse_type(Parser *p) {
         AstType *t = ast_type_new(p->arena, AST_TYPE_NAMED, start);
         t->named.name = name;
         t->named.path = NULL;
+
+        /* Generic args: Name<T, U, N> */
+        if (check(p, TOK_LT)) {
+            advance(p); /* consume '<' */
+            AstType *args[32];
+            u32 arg_count = 0;
+            while (!check(p, TOK_GT) && !check(p, TOK_EOF)) {
+                if (arg_count > 0) expect(p, TOK_COMMA, "expected ',' in generic args");
+                /* Allow expressions as generic args (for const generics like 256) */
+                if (is_primitive_type(p->current.kind) || check(p, TOK_IDENTIFIER) ||
+                    check(p, TOK_KW_SELF_TYPE) || check(p, TOK_AMP) ||
+                    check(p, TOK_KW_PTR) || check(p, TOK_KW_OWN) ||
+                    check(p, TOK_KW_SLICE) || check(p, TOK_LBRACKET) ||
+                    check(p, TOK_KW_FN) || check(p, TOK_BANG)) {
+                    args[arg_count++] = parse_type(p);
+                } else {
+                    /* Const generic: treat as type wrapping expression */
+                    AstType *ct = ast_type_new(p->arena, AST_TYPE_INFERRED, p->current.span);
+                    args[arg_count++] = ct;
+                    /* Skip the expression token(s) */
+                    advance(p);
+                }
+            }
+            expect(p, TOK_GT, "expected '>' after generic args");
+            AstType *gt = ast_type_new(p->arena, AST_TYPE_GENERIC, start);
+            gt->generic.base = t;
+            gt->generic.args = (AstType **)arena_alloc(p->arena, arg_count * sizeof(AstType*));
+            memcpy(gt->generic.args, args, arg_count * sizeof(AstType*));
+            gt->generic.arg_count = arg_count;
+            return gt;
+        }
         return t;
     }
 
@@ -373,7 +404,7 @@ static AstNode *parse_primary(Parser *p) {
         return n;
     }
 
-    /* Identifier or path */
+    /* asm! and other macros handled by the identifier block below */
     if (check(p, TOK_IDENTIFIER) || check(p, TOK_KW_SELF) ||
         check(p, TOK_KW_KERNEL) || check(p, TOK_KW_PORT) ||
         check(p, TOK_KW_ASM)) {
@@ -383,6 +414,21 @@ static AstNode *parse_primary(Parser *p) {
         else
             name = sv_from_cstr(token_kind_to_str(p->current.kind));
         advance(p);
+
+        /* ident followed by ! means macro call (like asm!, panic! etc) */
+        if (check(p, TOK_BANG)) {
+            advance(p); /* consume '!' */
+            expect(p, TOK_LPAREN, "expected '(' after macro name");
+            AstNode *n = ast_new(p->arena, AST_ASM_EXPR, start);
+            if (check(p, TOK_STRING_LITERAL)) {
+                n->asm_expr.template_str = sv_from_parts(p->current.str_lit.data, p->current.str_lit.length);
+                advance(p);
+            }
+            /* Skip remaining args */
+            while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) advance(p);
+            expect(p, TOK_RPAREN, "expected ')'");
+            return n;
+        }
 
         /* Check for path: a::b::c */
         if (check(p, TOK_COLON_COLON)) {
@@ -409,18 +455,7 @@ static AstNode *parse_primary(Parser *p) {
         return n;
     }
 
-    /* asm!("...") */
-    if (match(p, TOK_KW_ASM)) {
-        expect(p, TOK_BANG, "expected '!' after 'asm'");
-        expect(p, TOK_LPAREN, "expected '('");
-        AstNode *n = ast_new(p->arena, AST_ASM_EXPR, start);
-        if (check(p, TOK_STRING_LITERAL)) {
-            n->asm_expr.template_str = sv_from_parts(p->current.str_lit.data, p->current.str_lit.length);
-            advance(p);
-        }
-        expect(p, TOK_RPAREN, "expected ')'");
-        return n;
-    }
+    /* (asm! already handled above) */
 
     error_current(p, "expected expression");
     advance(p);
@@ -556,7 +591,9 @@ static AstNode *parse_block(Parser *p) {
 static AstNode *parse_let_stmt(Parser *p) {
     Span start = p->previous.span;
     bool is_mut = match(p, TOK_KW_MUT);
-    StringView name = sv_from_parts(p->current.ident.data, p->current.ident.length);
+    StringView name = {"<error>", 7};
+    if (check(p, TOK_IDENTIFIER))
+        name = sv_from_parts(p->current.ident.data, p->current.ident.length);
     expect(p, TOK_IDENTIFIER, "expected variable name");
     AstType *type = NULL;
     if (match(p, TOK_COLON)) type = parse_type(p);
@@ -684,7 +721,9 @@ static AstNode *parse_fn_decl(Parser *p, bool is_pub, AstAttribute *attribs, u32
         expect(p, TOK_KW_FN, "expected 'fn' after 'interrupt'");
     }
 
-    StringView name = sv_from_parts(p->current.ident.data, p->current.ident.length);
+    StringView name = {"<error>", 7};
+    if (check(p, TOK_IDENTIFIER))
+        name = sv_from_parts(p->current.ident.data, p->current.ident.length);
     expect(p, TOK_IDENTIFIER, "expected function name");
     expect(p, TOK_LPAREN, "expected '('");
 
@@ -710,7 +749,9 @@ static AstNode *parse_fn_decl(Parser *p, bool is_pub, AstAttribute *attribs, u32
                 params[param_count].type = parse_type(p);
             }
         } else {
-            params[param_count].name = sv_from_parts(p->current.ident.data, p->current.ident.length);
+            params[param_count].name = check(p, TOK_IDENTIFIER)
+                ? sv_from_parts(p->current.ident.data, p->current.ident.length)
+                : (StringView){"<error>", 7};
             expect(p, TOK_IDENTIFIER, "expected parameter name");
             expect(p, TOK_COLON, "expected ':' after parameter name");
             params[param_count].type = parse_type(p);
@@ -742,7 +783,9 @@ static AstNode *parse_fn_decl(Parser *p, bool is_pub, AstAttribute *attribs, u32
 
 static AstNode *parse_struct_decl(Parser *p, bool is_pub, AstAttribute *attribs, u32 ac) {
     Span start = p->previous.span;
-    StringView name = sv_from_parts(p->current.ident.data, p->current.ident.length);
+    StringView name = check(p, TOK_IDENTIFIER)
+        ? sv_from_parts(p->current.ident.data, p->current.ident.length)
+        : (StringView){"<error>", 7};
     expect(p, TOK_IDENTIFIER, "expected struct name");
     expect(p, TOK_LBRACE, "expected '{'");
     AstField fields[128];
@@ -750,7 +793,9 @@ static AstNode *parse_struct_decl(Parser *p, bool is_pub, AstAttribute *attribs,
     while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
         fields[count].span = p->current.span;
         fields[count].is_pub = match(p, TOK_KW_PUB);
-        fields[count].name = sv_from_parts(p->current.ident.data, p->current.ident.length);
+        fields[count].name = check(p, TOK_IDENTIFIER)
+            ? sv_from_parts(p->current.ident.data, p->current.ident.length)
+            : (StringView){"<error>", 7};
         expect(p, TOK_IDENTIFIER, "expected field name");
         expect(p, TOK_COLON, "expected ':'");
         fields[count].type = parse_type(p);
@@ -823,7 +868,9 @@ static AstNode *parse_const_decl(Parser *p, bool is_pub) {
 
 static AstNode *parse_driver_decl(Parser *p, bool is_pub) {
     Span start = p->previous.span;
-    StringView name = sv_from_parts(p->current.ident.data, p->current.ident.length);
+    StringView name = check(p, TOK_IDENTIFIER)
+        ? sv_from_parts(p->current.ident.data, p->current.ident.length)
+        : (StringView){"<error>", 7};
     expect(p, TOK_IDENTIFIER, "expected driver name");
     expect(p, TOK_LBRACE, "expected '{'");
     AstField fields[64]; u32 fc = 0;
@@ -838,7 +885,9 @@ static AstNode *parse_driver_decl(Parser *p, bool is_pub) {
         } else {
             fields[fc].span = p->current.span;
             fields[fc].is_pub = pub;
-            fields[fc].name = sv_from_parts(p->current.ident.data, p->current.ident.length);
+            fields[fc].name = check(p, TOK_IDENTIFIER)
+                ? sv_from_parts(p->current.ident.data, p->current.ident.length)
+                : (StringView){"<error>", 7};
             expect(p, TOK_IDENTIFIER, "expected field name");
             expect(p, TOK_COLON, "expected ':'");
             fields[fc].type = parse_type(p);
@@ -861,14 +910,18 @@ static AstNode *parse_driver_decl(Parser *p, bool is_pub) {
 
 static AstNode *parse_syscall_decl(Parser *p) {
     Span start = p->previous.span;
-    StringView name = sv_from_parts(p->current.ident.data, p->current.ident.length);
+    StringView name = check(p, TOK_IDENTIFIER)
+        ? sv_from_parts(p->current.ident.data, p->current.ident.length)
+        : (StringView){"<error>", 7};
     expect(p, TOK_IDENTIFIER, "expected syscall name");
     expect(p, TOK_LPAREN, "expected '('");
     AstParam params[32]; u32 pc = 0;
     while (!check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
         if (pc > 0) expect(p, TOK_COMMA, "expected ','");
         params[pc].span = p->current.span;
-        params[pc].name = sv_from_parts(p->current.ident.data, p->current.ident.length);
+        params[pc].name = check(p, TOK_IDENTIFIER)
+            ? sv_from_parts(p->current.ident.data, p->current.ident.length)
+            : (StringView){"<error>", 7};
         expect(p, TOK_IDENTIFIER, "expected param name");
         expect(p, TOK_COLON, "expected ':'");
         params[pc].type = parse_type(p);
