@@ -1,0 +1,234 @@
+{
+    "qplus-fn": {
+        "prefix": "fn",
+        "body": [
+            "pub fn ${1:name}(${2:params}) -> ${3:ReturnType} {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "Q+ function declaration"
+    },
+    "qplus-fn-unsafe": {
+        "prefix": "unsafe-fn",
+        "body": [
+            "pub unsafe fn ${1:name}(${2:params}) -> ${3:ReturnType} {",
+            "    unsafe {",
+            "        ${0}",
+            "    }",
+            "}"
+        ],
+        "description": "Q+ unsafe function"
+    },
+    "qplus-struct": {
+        "prefix": "struct",
+        "body": [
+            "pub struct ${1:Name} {",
+            "    ${2:field}: ${3:Type},",
+            "}"
+        ],
+        "description": "Q+ struct declaration"
+    },
+    "qplus-impl": {
+        "prefix": "impl",
+        "body": [
+            "impl ${1:TypeName} {",
+            "    pub fn ${2:new}() -> ${1:TypeName} {",
+            "        return ${1:TypeName} {",
+            "            ${0}",
+            "        };",
+            "    }",
+            "}"
+        ],
+        "description": "Q+ impl block"
+    },
+    "qplus-enum": {
+        "prefix": "enum",
+        "body": [
+            "pub enum ${1:Name} repr(${2:u8}) {",
+            "    ${3:Variant1} = 0,",
+            "    ${4:Variant2} = 1,",
+            "}"
+        ],
+        "description": "Q+ enum with repr"
+    },
+    "qplus-driver": {
+        "prefix": "driver",
+        "body": [
+            "driver ${1:MyDriver} {",
+            "    ${2:field}: ${3:Type},",
+            "}",
+            "",
+            "impl ${1:MyDriver} {",
+            "    pub fn init(self: &mut Self) -> bool {",
+            "        ${0}",
+            "        return true;",
+            "    }",
+            "}"
+        ],
+        "description": "Q+ driver declaration"
+    },
+    "qplus-syscall": {
+        "prefix": "syscall",
+        "body": [
+            "syscall ${1:name}(${2:arg}: ${3:u64}) -> i64 {",
+            "    ${0}",
+            "    return 0;",
+            "}"
+        ],
+        "description": "Q+ syscall declaration"
+    },
+    "qplus-interrupt": {
+        "prefix": "interrupt",
+        "body": [
+            "#[irq_handler]",
+            "pub fn ${1:irq_name}_handler() -> void {",
+            "    // Handle IRQ${2:num}",
+            "    ${0}",
+            "    // Send EOI",
+            "    unsafe { regs::outb(0x20, 0x20); }",
+            "}"
+        ],
+        "description": "Q+ interrupt handler"
+    },
+    "qplus-unsafe-block": {
+        "prefix": "unsafe",
+        "body": [
+            "unsafe {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "Q+ unsafe block"
+    },
+    "qplus-asm": {
+        "prefix": "asm",
+        "body": [
+            "unsafe {",
+            "    asm!(\"${1:instruction}\");",
+            "}"
+        ],
+        "description": "Q+ inline assembly"
+    },
+    "qplus-mmio-read": {
+        "prefix": "mmio-read",
+        "body": [
+            "let ${1:val}: ${2:u32} = unsafe {",
+            "    volatile *(${3:MMIO_BASE} as *const ${2:u32})",
+            "};"
+        ],
+        "description": "Q+ MMIO volatile read"
+    },
+    "qplus-mmio-write": {
+        "prefix": "mmio-write",
+        "body": [
+            "unsafe {",
+            "    volatile *(${1:MMIO_BASE} as *mut ${2:u32}) = ${3:value};",
+            "}"
+        ],
+        "description": "Q+ MMIO volatile write"
+    },
+    "qplus-let": {
+        "prefix": "let",
+        "body": ["let ${1:name}: ${2:Type} = ${3:value};"],
+        "description": "Q+ let binding"
+    },
+    "qplus-let-mut": {
+        "prefix": "letm",
+        "body": ["let mut ${1:name}: ${2:Type} = ${3:value};"],
+        "description": "Q+ mutable let binding"
+    },
+    "qplus-match": {
+        "prefix": "match",
+        "body": [
+            "match ${1:expr} {",
+            "    ${2:Pattern} => {",
+            "        ${0}",
+            "    }",
+            "    _ => {}",
+            "}"
+        ],
+        "description": "Q+ match expression"
+    },
+    "qplus-for": {
+        "prefix": "for",
+        "body": [
+            "for ${1:i} in ${2:0..n} {",
+            "    ${0}",
+            "}"
+        ],
+        "description": "Q+ for loop"
+    },
+    "qplus-loop": {
+        "prefix": "loop",
+        "body": [
+            "loop {",
+            "    ${0}",
+            "    unsafe { asm!(\"pause\"); }",
+            "}"
+        ],
+        "description": "Q+ infinite loop"
+    },
+    "qplus-module": {
+        "prefix": "module",
+        "body": [
+            "module ${1:module_name};",
+            "",
+            "${0}"
+        ],
+        "description": "Q+ module header"
+    },
+    "qplus-import": {
+        "prefix": "import",
+        "body": ["import qpstd::${1:module}::${2:item};"],
+        "description": "Q+ import statement"
+    },
+    "qplus-kernel-main": {
+        "prefix": "kernel-main",
+        "body": [
+            "module ${1:my_kernel};",
+            "",
+            "import qpstd::drivers::vga;",
+            "import qpstd::drivers::serial;",
+            "import qpstd::cpu::interrupts;",
+            "import qpstd::mem::allocator;",
+            "",
+            "#[no_mangle]",
+            "pub fn kernel_main(_mb_magic: u64, _mb_info: u64) -> ! {",
+            "    vga::vga_init();",
+            "    serial::serial_init();",
+            "    allocator::init(0xFFFF_8000_0040_0000 as *mut u8, 16 * 1024 * 1024);",
+            "    interrupts::idt_init();",
+            "",
+            "    vga::vga_write_str(\"${2:Hello from Q+!}\\n\");",
+            "    serial::serial_write_str(\"${2:Hello from Q+!}\\n\");",
+            "",
+            "    unsafe { asm!(\"sti\"); }",
+            "",
+            "    ${0}",
+            "",
+            "    loop { unsafe { asm!(\"hlt\"); } }",
+            "}"
+        ],
+        "description": "Q+ kernel entry point template"
+    },
+    "qplus-spinlock": {
+        "prefix": "spinlock",
+        "body": [
+            "let mut ${1:lock}: ipc::Spinlock = ipc::Spinlock::new();",
+            "${1:lock}.acquire();",
+            "defer { ${1:lock}.release(); }",
+            "${0}"
+        ],
+        "description": "Q+ spinlock with defer-release pattern"
+    },
+    "qplus-result": {
+        "prefix": "result",
+        "body": [
+            "let ${1:result}: Result<${2:T}, ${3:E}> = ${4:expr};",
+            "match ${1:result} {",
+            "    Ok(${5:val}) => { ${0} }",
+            "    Err(${6:e}) => { return Err(${6:e}); }",
+            "}"
+        ],
+        "description": "Q+ Result<T,E> handling"
+    }
+}

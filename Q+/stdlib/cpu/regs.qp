@@ -1,0 +1,132 @@
+// Q+ Standard Library — CPU Registers & Context Switch (x86-64)
+// module: qpstd::cpu::regs
+
+module qpstd::cpu::regs;
+
+// ── MSR access ───────────────────────────────────────────────────
+
+pub const MSR_IA32_APIC_BASE: u32 = 0x1B;
+pub const MSR_IA32_EFER:      u32 = 0xC0000080;
+pub const MSR_IA32_STAR:      u32 = 0xC0000081;
+pub const MSR_IA32_LSTAR:     u32 = 0xC0000082;
+pub const MSR_IA32_FMASK:     u32 = 0xC0000084;
+pub const MSR_IA32_GS_BASE:   u32 = 0xC0000101;
+
+pub fn rdmsr(msr: u32) -> u64 {
+    let lo: u32 = 0;
+    let hi: u32 = 0;
+    unsafe { asm!("rdmsr"); }
+    return ((hi as u64) << 32) | (lo as u64);
+}
+
+pub fn wrmsr(msr: u32, value: u64) -> void {
+    let lo: u32 = (value & 0xFFFFFFFF) as u32;
+    let hi: u32 = ((value >> 32) & 0xFFFFFFFF) as u32;
+    unsafe { asm!("wrmsr"); }
+}
+
+// ── Control registers ────────────────────────────────────────────
+
+pub fn read_cr0() -> u64 {
+    let val: u64 = 0;
+    unsafe { asm!("mov rax, cr0"); }
+    return val;
+}
+
+pub fn write_cr0(val: u64) -> void {
+    unsafe { asm!("mov cr0, rax", val); }
+}
+
+pub fn read_cr2() -> u64 {
+    let val: u64 = 0;
+    unsafe { asm!("mov rax, cr2"); }
+    return val;
+}
+
+pub fn read_cr3() -> u64 {
+    let val: u64 = 0;
+    unsafe { asm!("mov rax, cr3"); }
+    return val;
+}
+
+pub fn write_cr3(val: u64) -> void {
+    unsafe { asm!("mov cr3, rax", val); }
+}
+
+pub fn read_cr4() -> u64 {
+    let val: u64 = 0;
+    unsafe { asm!("mov rax, cr4"); }
+    return val;
+}
+
+pub fn write_cr4(val: u64) -> void {
+    unsafe { asm!("mov cr4, rax", val); }
+}
+
+// ── Full CPU context for task switching ──────────────────────────
+
+#[repr(C)]
+pub struct CpuContext {
+    // General-purpose registers (callee-save per SysV AMD64)
+    pub rsp: u64,
+    pub rbp: u64,
+    pub rbx: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    // Instruction pointer (where to resume)
+    pub rip: u64,
+    // Segment registers
+    pub cs:  u64,
+    pub ss:  u64,
+    pub rflags: u64,
+    // FPU/SSE: optional — save xmm0-xmm15 if needed (512 bytes)
+}
+
+impl CpuContext {
+    pub fn new_kernel(rip: u64, stack_top: u64) -> CpuContext {
+        return CpuContext {
+            rsp:    stack_top,
+            rbp:    0,
+            rbx:    0,
+            r12:    0, r13:    0, r14:    0, r15: 0,
+            rip:    rip,
+            cs:     0x08,  // kernel code segment
+            ss:     0x10,  // kernel data segment
+            rflags: 0x202, // IF=1, reserved=1
+        };
+    }
+}
+
+// ── Context switch (assembly) ────────────────────────────────────
+// Signature: switch_context(old: &mut CpuContext, new: &CpuContext)
+// Saves caller-save regs into *old, loads from *new, returns to new.rip
+
+#[no_mangle]
+pub fn switch_context(old: &mut CpuContext, new: &CpuContext) -> void {
+    unsafe {
+        asm!(
+            r"
+            mov [rdi],    rsp
+            mov [rdi+8],  rbp
+            mov [rdi+16], rbx
+            mov [rdi+24], r12
+            mov [rdi+32], r13
+            mov [rdi+40], r14
+            mov [rdi+48], r15
+            mov [rdi+56], rip_stub
+            mov r12, rsi
+            mov rsp, [r12]
+            mov rbp, [r12+8]
+            mov rbx, [r12+16]
+            mov r12, [r12+24]
+            mov r13, [r12+32]
+            mov r14, [r12+40]
+            mov r15, [r12+48]
+            ret
+            rip_stub:
+            "
+        );
+    }
+}

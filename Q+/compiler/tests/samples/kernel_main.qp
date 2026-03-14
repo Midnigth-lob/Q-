@@ -1,0 +1,102 @@
+// Q+ Test Sample — Complete Kernel Main (integration test)
+// Tests: module, imports, drivers, scheduler, process creation
+
+module kernel_integration_test;
+
+import qpstd::drivers::vga;
+import qpstd::drivers::serial;
+import qpstd::drivers::timer;
+import qpstd::cpu::interrupts;
+import qpstd::mem::allocator;
+import qpstd::kernel::scheduler;
+import qpstd::kernel::process;
+import qpstd::kernel::ipc;
+import qpstd::kernel::syscall_table;
+import qpstd::util::fmt;
+
+// ── Worker thread: counts ticks and prints ────────────────────
+static mut TICK_COUNT: u32 = 0;
+
+fn worker_thread(_arg: u64) -> void {
+    let mut buf: [u8; 64] = [0; 64];
+    loop {
+        unsafe { TICK_COUNT += 1; }
+        let mut f: fmt::Fmt = fmt::Fmt::new(buf.as_mut_ptr(), 64);
+        f.write_str("[worker] tick=");
+        f.write_u64(unsafe { TICK_COUNT } as u64);
+        f.write_byte('\n');
+        serial::serial_write_str(f.as_cstr());
+
+        // Yield to scheduler every tick
+        scheduler::sched_yield();
+    }
+}
+
+// ── Channel IPC test ──────────────────────────────────────────
+static mut MSG_CHANNEL: ipc::Channel<u32> = ipc::Channel::new();
+
+fn producer_thread(_arg: u64) -> void {
+    let mut n: u32 = 0;
+    loop {
+        unsafe {
+            MSG_CHANNEL.send(n);
+        }
+        n += 1;
+        scheduler::sched_yield();
+    }
+}
+
+fn consumer_thread(_arg: u64) -> void {
+    loop {
+        let val: Option<u32> = unsafe { MSG_CHANNEL.recv() };
+        match val {
+            Some(v) => {
+                let mut buf: [u8; 64] = [0; 64];
+                let mut f: fmt::Fmt = fmt::Fmt::new(buf.as_mut_ptr(), 64);
+                f.write_str("[consumer] got=");
+                f.write_u64(v as u64);
+                f.write_byte('\n');
+                serial::serial_write_str(f.as_cstr());
+            }
+            None => {}
+        }
+        scheduler::sched_yield();
+    }
+}
+
+// ── Kernel main ───────────────────────────────────────────────
+#[no_mangle]
+pub fn kernel_main(_mb_magic: u64, _mb_info: u64) -> ! {
+    vga::vga_init();
+    serial::serial_init();
+    allocator::init(0xFFFF_8000_0040_0000 as *mut u8, 16 * 1024 * 1024);
+    interrupts::idt_init();
+    timer::timer_init(1000);
+    syscall_table::init_syscalls();
+
+    vga::vga_write_str("Q+ Integration Test Kernel\n");
+    serial::serial_write_str("[boot] All subsystems initialized\n");
+
+    unsafe { asm!("sti"); }
+
+    // Create test processes
+    let p0: *mut process::Process = process::process_create(0, 0, "worker");
+    let t0: *mut process::Thread  = process::thread_create(unsafe { (*p0).pid }, worker_thread,   0, 5);
+    process::process_add_thread(p0, t0);
+    scheduler::sched_add(t0);
+
+    let p1: *mut process::Process = process::process_create(0, 0, "producer");
+    let t1: *mut process::Thread  = process::thread_create(unsafe { (*p1).pid }, producer_thread, 0, 3);
+    process::process_add_thread(p1, t1);
+    scheduler::sched_add(t1);
+
+    let p2: *mut process::Process = process::process_create(0, 0, "consumer");
+    let t2: *mut process::Thread  = process::thread_create(unsafe { (*p2).pid }, consumer_thread, 0, 3);
+    process::process_add_thread(p2, t2);
+    scheduler::sched_add(t2);
+
+    serial::serial_write_str("[boot] Starting scheduler\n");
+    scheduler::sched_start();
+
+    loop { unsafe { asm!("hlt"); } }
+}

@@ -1,0 +1,115 @@
+// Q+ Standard Library — Virtual File System (VFS)
+// module: qpstd::fs::vfs
+
+module qpstd::fs::vfs;
+
+// ── VFS node types ────────────────────────────────────────────────
+
+pub enum VfsNodeType : u8 {
+    File        = 0,
+    Directory   = 1,
+    Device      = 2,
+    Symlink     = 3,
+    Pipe        = 4,
+}
+
+// ── Open flags ────────────────────────────────────────────────────
+
+pub const O_RDONLY: u32 = 0x0000;
+pub const O_WRONLY: u32 = 0x0001;
+pub const O_RDWR:   u32 = 0x0002;
+pub const O_CREAT:  u32 = 0x0040;
+pub const O_TRUNC:  u32 = 0x0200;
+pub const O_APPEND: u32 = 0x0400;
+
+// ── VFS operations trait ──────────────────────────────────────────
+
+pub trait VfsOps {
+    fn read(self: &mut Self, buf: ptr<u8>, off: u64, len: usize) -> isize;
+    fn write(self: &mut Self, buf: ptr<u8>, off: u64, len: usize) -> isize;
+    fn open(self: &mut Self, flags: u32) -> i32;
+    fn close(self: &mut Self) -> i32;
+    fn size(self: &Self) -> u64;
+    fn node_type(self: &Self) -> VfsNodeType;
+}
+
+// ── VfsNode (in-memory inode) ─────────────────────────────────────
+
+pub struct VfsNode {
+    pub name:     [u8; 256],
+    pub kind:     VfsNodeType,
+    pub size:     u64,
+    pub inode:    u64,
+    pub refs:     u32,
+    pub ops:      ptr<VfsOps>,     // pointer to filesystem-specific ops
+    pub children: ptr<VfsNode>,    // linked list of directory children
+    pub sibling:  ptr<VfsNode>,    // next sibling
+    pub parent:   ptr<VfsNode>,
+}
+
+impl VfsNode {
+    pub fn read(self: &mut Self, buf: ptr<u8>, off: u64, len: usize) -> isize {
+        if self.ops == null { return -1; }
+        return unsafe { (*self.ops).read(self, buf, off, len) };
+    }
+
+    pub fn write(self: &mut Self, buf: ptr<u8>, off: u64, len: usize) -> isize {
+        if self.ops == null { return -1; }
+        return unsafe { (*self.ops).write(self, buf, off, len) };
+    }
+
+    pub fn is_dir(self: &Self) -> bool {
+        return self.kind == VfsNodeType::Directory;
+    }
+
+    pub fn is_file(self: &Self) -> bool {
+        return self.kind == VfsNodeType::File;
+    }
+}
+
+// ── File descriptor table ─────────────────────────────────────────
+
+pub const MAX_FDS: usize = 64;
+
+pub struct FileDescriptor {
+    pub node:   ptr<VfsNode>,
+    pub offset: u64,
+    pub flags:  u32,
+    pub valid:  bool,
+}
+
+pub struct FdTable {
+    fds: [FileDescriptor; MAX_FDS],
+}
+
+impl FdTable {
+    pub fn new() -> FdTable {
+        return FdTable {
+            fds: [FileDescriptor { node: null, offset: 0, flags: 0, valid: false }; MAX_FDS],
+        };
+    }
+
+    pub fn alloc(self: &mut Self, node: ptr<VfsNode>, flags: u32) -> i32 {
+        let mut i: usize = 3;   // 0,1,2 reserved for stdin/stdout/stderr
+        while i < MAX_FDS {
+            if not self.fds[i].valid {
+                self.fds[i] = FileDescriptor { node: node, offset: 0, flags: flags, valid: true };
+                return i as i32;
+            }
+            i += 1;
+        }
+        return -1;  // EMFILE
+    }
+
+    pub fn get(self: &mut Self, fd: i32) -> Option<&mut FileDescriptor> {
+        if fd < 0 or (fd as usize) >= MAX_FDS { return None; }
+        if not self.fds[fd as usize].valid { return None; }
+        return Some(&mut self.fds[fd as usize]);
+    }
+
+    pub fn close(self: &mut Self, fd: i32) -> bool {
+        if fd < 0 or (fd as usize) >= MAX_FDS { return false; }
+        self.fds[fd as usize].valid = false;
+        return true;
+    }
+}

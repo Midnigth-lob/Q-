@@ -1,0 +1,157 @@
+// Q+ Standard Library — ATA PIO Disk Driver (Primary Bus)
+// module: qpstd::drivers::disk
+
+module qpstd::drivers::disk;
+
+import qpstd::cpu::regs;
+
+// ── ATA PIO registers (Primary bus, base=0x1F0) ───────────────
+pub const ATA_PRIMARY_BASE:    u16 = 0x1F0;
+pub const ATA_REG_DATA:        u16 = 0x000;  // base + 0
+pub const ATA_REG_ERROR:       u16 = 0x001;
+pub const ATA_REG_SECTOR_CNT:  u16 = 0x002;
+pub const ATA_REG_LBA_LO:      u16 = 0x003;
+pub const ATA_REG_LBA_MID:     u16 = 0x004;
+pub const ATA_REG_LBA_HI:      u16 = 0x005;
+pub const ATA_REG_DRIVE:       u16 = 0x006;
+pub const ATA_REG_STATUS:      u16 = 0x007;
+pub const ATA_REG_COMMAND:     u16 = 0x007;  // same port: read=status, write=cmd
+pub const ATA_CTRL_ALTSTATUS:  u16 = 0x206;  // device control / alternate status
+
+// ── Status bits ───────────────────────────────────────────────
+pub const ATA_SR_BSY:  u8 = 0x80;  // Busy
+pub const ATA_SR_DRDY: u8 = 0x40;  // Drive ready
+pub const ATA_SR_DF:   u8 = 0x20;  // Drive write fault
+pub const ATA_SR_DSC:  u8 = 0x10;  // Drive seek complete
+pub const ATA_SR_DRQ:  u8 = 0x08;  // Data request ready
+pub const ATA_SR_ERR:  u8 = 0x01;  // Error
+
+// ── Commands ──────────────────────────────────────────────────
+pub const ATA_CMD_READ_PIO:    u8 = 0x20;
+pub const ATA_CMD_WRITE_PIO:   u8 = 0x30;
+pub const ATA_CMD_FLUSH:       u8 = 0xE7;
+pub const ATA_CMD_IDENTIFY:    u8 = 0xEC;
+
+pub const SECTOR_SIZE: usize = 512;
+
+// ── Drive selection ───────────────────────────────────────────
+pub enum AtaDrive repr(u8) {
+    Master = 0xE0,  // bit 6 = LBA mode, bit 4 = 0 (master)
+    Slave  = 0xF0,  // bit 4 = 1 (slave)
+}
+
+// ── ATA device struct ─────────────────────────────────────────
+pub struct AtaDisk {
+    base:  u16,         // I/O base (0x1F0 for primary)
+    drive: AtaDrive,
+    present: bool,
+    lba28_sectors: u32,
+}
+
+impl AtaDisk {
+    pub fn new(base: u16, drive: AtaDrive) -> AtaDisk {
+        return AtaDisk { base: base, drive: drive, present: false, lba28_sectors: 0 };
+    }
+
+    // Poll BSY=0 and optionally DRQ=1
+    fn wait_ready(self: &Self) -> bool {
+        let mut status: u8 = 0;
+        for _ in 0..100000 {
+            status = regs::inb(self.base + ATA_REG_STATUS);
+            if status & ATA_SR_BSY == 0 { break; }
+        }
+        if status & (ATA_SR_DF | ATA_SR_ERR) != 0 { return false; }
+        return true;
+    }
+
+    // 400ns delay via alternate status reads
+    fn delay400ns(self: &Self) -> void {
+        for _ in 0..4 {
+            regs::inb(self.base + ATA_CTRL_ALTSTATUS);
+        }
+    }
+
+    // IDENTIFY command — detects drive presence and sector count
+    pub fn identify(self: &mut Self) -> bool {
+        regs::outb(self.base + ATA_REG_DRIVE, self.drive as u8);
+        self.delay400ns();
+
+        regs::outb(self.base + ATA_REG_SECTOR_CNT, 0);
+        regs::outb(self.base + ATA_REG_LBA_LO,    0);
+        regs::outb(self.base + ATA_REG_LBA_MID,   0);
+        regs::outb(self.base + ATA_REG_LBA_HI,    0);
+        regs::outb(self.base + ATA_REG_COMMAND,   ATA_CMD_IDENTIFY);
+
+        let status: u8 = regs::inb(self.base + ATA_REG_STATUS);
+        if status == 0 { return false; }  // No drive
+
+        if !self.wait_ready() { return false; }
+
+        // Check that mid/hi LBA are 0 (ATAPI has non-zero)
+        let mid: u8 = regs::inb(self.base + ATA_REG_LBA_MID);
+        let hi: u8  = regs::inb(self.base + ATA_REG_LBA_HI);
+        if mid != 0 || hi != 0 { return false; }  // ATAPI, not ATA
+
+        // Read 256 16-bit words
+        let mut buf: [u16; 256] = [0; 256];
+        for i in 0..256 {
+            buf[i] = regs::inw(self.base + ATA_REG_DATA);
+        }
+        // Words 60-61: 28-bit LBA sector count
+        self.lba28_sectors = buf[60] as u32 | ((buf[61] as u32) << 16);
+        self.present = true;
+        return true;
+    }
+
+    // LBA28 read: read `count` sectors starting at LBA `lba` into `buf`
+    pub fn read_sectors(self: &Self, lba: u32, count: u8, buf: *mut u8) -> bool {
+        if !self.present { return false; }
+        if count == 0 { return true; }
+
+        regs::outb(self.base + ATA_REG_DRIVE,
+            (self.drive as u8 | ((lba >> 24) & 0x0F) as u8));
+        regs::outb(self.base + ATA_REG_SECTOR_CNT, count);
+        regs::outb(self.base + ATA_REG_LBA_LO,  (lba & 0xFF) as u8);
+        regs::outb(self.base + ATA_REG_LBA_MID, ((lba >> 8)  & 0xFF) as u8);
+        regs::outb(self.base + ATA_REG_LBA_HI,  ((lba >> 16) & 0xFF) as u8);
+        regs::outb(self.base + ATA_REG_COMMAND,  ATA_CMD_READ_PIO);
+
+        for sec in 0..count as usize {
+            if !self.wait_ready() { return false; }
+            let ptr: *mut u16 = unsafe { buf.add(sec * SECTOR_SIZE) as *mut u16 };
+            for i in 0..256 {
+                unsafe { *ptr.add(i) = regs::inw(self.base + ATA_REG_DATA); }
+            }
+        }
+        return true;
+    }
+
+    // LBA28 write: write `count` sectors from `buf` starting at LBA `lba`
+    pub fn write_sectors(self: &Self, lba: u32, count: u8, buf: *const u8) -> bool {
+        if !self.present { return false; }
+        if count == 0 { return true; }
+
+        regs::outb(self.base + ATA_REG_DRIVE,
+            (self.drive as u8 | ((lba >> 24) & 0x0F) as u8));
+        regs::outb(self.base + ATA_REG_SECTOR_CNT, count);
+        regs::outb(self.base + ATA_REG_LBA_LO,  (lba & 0xFF) as u8);
+        regs::outb(self.base + ATA_REG_LBA_MID, ((lba >> 8)  & 0xFF) as u8);
+        regs::outb(self.base + ATA_REG_LBA_HI,  ((lba >> 16) & 0xFF) as u8);
+        regs::outb(self.base + ATA_REG_COMMAND,  ATA_CMD_WRITE_PIO);
+
+        for sec in 0..count as usize {
+            if !self.wait_ready() { return false; }
+            let ptr: *const u16 = unsafe { buf.add(sec * SECTOR_SIZE) as *const u16 };
+            for i in 0..256 {
+                regs::outw(self.base + ATA_REG_DATA, unsafe { *ptr.add(i) });
+            }
+        }
+        // Flush write cache
+        regs::outb(self.base + ATA_REG_COMMAND, ATA_CMD_FLUSH);
+        self.wait_ready();
+        return true;
+    }
+
+    pub fn sector_count(self: &Self) -> u32 { return self.lba28_sectors; }
+    pub fn is_present(self: &Self) -> bool  { return self.present; }
+}

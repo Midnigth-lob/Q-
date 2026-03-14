@@ -1,0 +1,160 @@
+// Q+ Standard Library — Virtual Memory Manager
+// module: qpstd::mem::vmm
+// Manages x86_64 4-level paging (PML4 → PDPT → PD → PT)
+
+module qpstd::mem::vmm;
+
+import qpstd::mem::paging;
+import qpstd::cpu::regs;
+
+// ── Page flags ────────────────────────────────────────────────
+pub const PAGE_PRESENT:     u64 = 0x001;
+pub const PAGE_WRITABLE:    u64 = 0x002;
+pub const PAGE_USER:        u64 = 0x004;
+pub const PAGE_WRITE_THRU:  u64 = 0x008;
+pub const PAGE_NO_CACHE:    u64 = 0x010;
+pub const PAGE_ACCESSED:    u64 = 0x020;
+pub const PAGE_DIRTY:       u64 = 0x040;
+pub const PAGE_HUGE:        u64 = 0x080;
+pub const PAGE_GLOBAL:      u64 = 0x100;
+pub const PAGE_NX:          u64 = 0x8000_0000_0000_0000;
+
+// ── Virtual address breakdown helpers ─────────────────────────
+// x86_64: vaddr[47:39]=PML4, [38:30]=PDPT, [29:21]=PD, [20:12]=PT, [11:0]=offset
+
+pub fn pml4_index(vaddr: u64) -> usize {
+    return ((vaddr >> 39) & 0x1FF) as usize;
+}
+pub fn pdpt_index(vaddr: u64) -> usize {
+    return ((vaddr >> 30) & 0x1FF) as usize;
+}
+pub fn pd_index(vaddr: u64) -> usize {
+    return ((vaddr >> 21) & 0x1FF) as usize;
+}
+pub fn pt_index(vaddr: u64) -> usize {
+    return ((vaddr >> 12) & 0x1FF) as usize;
+}
+pub fn page_offset(vaddr: u64) -> u64 {
+    return vaddr & 0xFFF;
+}
+
+// ── Page table entry type ──────────────────────────────────────
+pub type Pte = u64;
+
+// ── Page table (512 entries of 8 bytes = 4096 bytes = 1 page) ─
+#[repr(C, align(4096))]
+pub struct PageTable {
+    entries: [Pte; 512],
+}
+
+// ── VMM state ─────────────────────────────────────────────────
+pub struct Vmm {
+    pml4_phys: u64,  // physical address of the PML4 table
+}
+
+impl Vmm {
+    // Initialize VMM with a given physical PML4 base
+    pub fn init(pml4_phys: u64) -> Vmm {
+        return Vmm { pml4_phys: pml4_phys };
+    }
+
+    // Load this address space into CR3
+    pub fn activate(self: &Self) -> void {
+        unsafe {
+            asm!("mov cr3, {0}", in(reg) self.pml4_phys);
+        }
+    }
+
+    // Map a physical page to a virtual address with given flags.
+    // Caller must supply a bump allocator that returns zeroed physical pages.
+    pub fn map_page(
+        self: &mut Self,
+        vaddr:     u64,
+        paddr:     u64,
+        flags:     u64,
+        alloc_page: fn() -> u64,  // returns phys addr of zeroed 4KB page
+    ) -> bool {
+        let hhdm_base: u64 = 0xFFFF_8000_0000_0000; // higher-half direct map
+
+        // pml4
+        let pml4: *mut PageTable = (self.pml4_phys + hhdm_base) as *mut PageTable;
+        let pml4e: *mut Pte = unsafe { &mut (*pml4).entries[pml4_index(vaddr)] };
+        if unsafe { *pml4e } & PAGE_PRESENT == 0 {
+            let new_page: u64 = alloc_page();
+            if new_page == 0 { return false; }
+            unsafe { *pml4e = new_page | PAGE_PRESENT | PAGE_WRITABLE | (flags & PAGE_USER); }
+        }
+        let pdpt_phys: u64 = unsafe { *pml4e } & 0x000F_FFFF_FFFF_F000;
+
+        // pdpt
+        let pdpt: *mut PageTable = (pdpt_phys + hhdm_base) as *mut PageTable;
+        let pdpte: *mut Pte = unsafe { &mut (*pdpt).entries[pdpt_index(vaddr)] };
+        if unsafe { *pdpte } & PAGE_PRESENT == 0 {
+            let new_page: u64 = alloc_page();
+            if new_page == 0 { return false; }
+            unsafe { *pdpte = new_page | PAGE_PRESENT | PAGE_WRITABLE | (flags & PAGE_USER); }
+        }
+        let pd_phys: u64 = unsafe { *pdpte } & 0x000F_FFFF_FFFF_F000;
+
+        // pd
+        let pd: *mut PageTable = (pd_phys + hhdm_base) as *mut PageTable;
+        let pde: *mut Pte = unsafe { &mut (*pd).entries[pd_index(vaddr)] };
+        if unsafe { *pde } & PAGE_PRESENT == 0 {
+            let new_page: u64 = alloc_page();
+            if new_page == 0 { return false; }
+            unsafe { *pde = new_page | PAGE_PRESENT | PAGE_WRITABLE | (flags & PAGE_USER); }
+        }
+        let pt_phys: u64 = unsafe { *pde } & 0x000F_FFFF_FFFF_F000;
+
+        // pt — final mapping
+        let pt: *mut PageTable = (pt_phys + hhdm_base) as *mut PageTable;
+        let pte: *mut Pte = unsafe { &mut (*pt).entries[pt_index(vaddr)] };
+        unsafe { *pte = (paddr & 0x000F_FFFF_FFFF_F000) | flags | PAGE_PRESENT; }
+
+        // Flush TLB for this address
+        unsafe { asm!("invlpg [{0}]", in(reg) vaddr); }
+        return true;
+    }
+
+    // Unmap a virtual page (does NOT free the physical page)
+    pub fn unmap_page(self: &mut Self, vaddr: u64) -> void {
+        let hhdm_base: u64 = 0xFFFF_8000_0000_0000;
+        let pml4: *mut PageTable = (self.pml4_phys + hhdm_base) as *mut PageTable;
+        let pml4e: Pte = unsafe { (*pml4).entries[pml4_index(vaddr)] };
+        if pml4e & PAGE_PRESENT == 0 { return; }
+
+        let pdpt: *mut PageTable = ((pml4e & 0x000F_FFFF_FFFF_F000) + hhdm_base) as *mut PageTable;
+        let pdpte: Pte = unsafe { (*pdpt).entries[pdpt_index(vaddr)] };
+        if pdpte & PAGE_PRESENT == 0 { return; }
+
+        let pd: *mut PageTable = ((pdpte & 0x000F_FFFF_FFFF_F000) + hhdm_base) as *mut PageTable;
+        let pde: Pte = unsafe { (*pd).entries[pd_index(vaddr)] };
+        if pde & PAGE_PRESENT == 0 { return; }
+
+        let pt: *mut PageTable = ((pde & 0x000F_FFFF_FFFF_F000) + hhdm_base) as *mut PageTable;
+        unsafe { (*pt).entries[pt_index(vaddr)] = 0; }
+        unsafe { asm!("invlpg [{0}]", in(reg) vaddr); }
+    }
+
+    // Translate a virtual address to its physical address (None if not mapped)
+    pub fn translate(self: &Self, vaddr: u64) -> Option<u64> {
+        let hhdm_base: u64 = 0xFFFF_8000_0000_0000;
+        let pml4: *const PageTable = (self.pml4_phys + hhdm_base) as *const PageTable;
+        let pml4e: Pte = unsafe { (*pml4).entries[pml4_index(vaddr)] };
+        if pml4e & PAGE_PRESENT == 0 { return None; }
+
+        let pdpt: *const PageTable = ((pml4e & 0x000F_FFFF_FFFF_F000) + hhdm_base) as *const PageTable;
+        let pdpte: Pte = unsafe { (*pdpt).entries[pdpt_index(vaddr)] };
+        if pdpte & PAGE_PRESENT == 0 { return None; }
+
+        let pd: *const PageTable = ((pdpte & 0x000F_FFFF_FFFF_F000) + hhdm_base) as *const PageTable;
+        let pde: Pte = unsafe { (*pd).entries[pd_index(vaddr)] };
+        if pde & PAGE_PRESENT == 0 { return None; }
+
+        let pt: *const PageTable = ((pde & 0x000F_FFFF_FFFF_F000) + hhdm_base) as *const PageTable;
+        let pte: Pte = unsafe { (*pt).entries[pt_index(vaddr)] };
+        if pte & PAGE_PRESENT == 0 { return None; }
+
+        return Some((pte & 0x000F_FFFF_FFFF_F000) | page_offset(vaddr));
+    }
+}

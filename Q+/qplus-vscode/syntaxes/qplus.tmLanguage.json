@@ -1,16 +1,22 @@
 {
     "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
     "name": "Q+",
+    "scopeName": "source.qplus",
+    "fileTypes": ["qp"],
     "patterns": [
         { "include": "#comments" },
-        { "include": "#strings" },
-        { "include": "#numbers" },
-        { "include": "#macros" },
         { "include": "#attributes" },
+        { "include": "#strings" },
+        { "include": "#char_literals" },
+        { "include": "#numbers" },
         { "include": "#keywords" },
         { "include": "#types" },
+        { "include": "#unsafe_block" },
+        { "include": "#asm_macro" },
         { "include": "#functions" },
-        { "include": "#operators" }
+        { "include": "#operators" },
+        { "include": "#punctuation" },
+        { "include": "#identifiers" }
     ],
     "repository": {
         "comments": {
@@ -22,7 +28,21 @@
                 {
                     "name": "comment.block.qplus",
                     "begin": "/\\*",
-                    "end": "\\*/"
+                    "end": "\\*/",
+                    "patterns": [{ "include": "#comments" }]
+                }
+            ]
+        },
+        "attributes": {
+            "name": "meta.attribute.qplus",
+            "begin": "#\\[",
+            "end": "\\]",
+            "beginCaptures": { "0": { "name": "punctuation.definition.attribute.qplus" } },
+            "endCaptures":   { "0": { "name": "punctuation.definition.attribute.qplus" } },
+            "patterns": [
+                {
+                    "name": "entity.other.attribute-name.qplus",
+                    "match": "[a-zA-Z_][a-zA-Z0-9_]*"
                 }
             ]
         },
@@ -33,73 +53,45 @@
                     "begin": "\"",
                     "end": "\"",
                     "patterns": [
-                        {
-                            "name": "constant.character.escape.qplus",
-                            "match": "\\\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|u\\{[0-9a-fA-F]{1,6}\\}|[nrt\\\\'\"])"
-                        }
+                        { "name": "constant.character.escape.qplus", "match": "\\\\." }
                     ]
                 },
                 {
-                    "name": "string.quoted.raw.qplus",
+                    "name": "string.quoted.other.raw.qplus",
                     "begin": "r\"",
                     "end": "\""
-                },
-                {
-                    "name": "string.quoted.single.qplus",
-                    "match": "'([^'\\\\]|\\\\.)'"
                 }
+            ]
+        },
+        "char_literals": {
+            "name": "string.quoted.single.qplus",
+            "begin": "'",
+            "end": "'",
+            "patterns": [
+                { "name": "constant.character.escape.qplus", "match": "\\\\." }
             ]
         },
         "numbers": {
             "patterns": [
                 {
                     "name": "constant.numeric.hex.qplus",
-                    "match": "\\b0x[0-9a-fA-F_]+\\b"
+                    "match": "0[xX][0-9a-fA-F_]+"
                 },
                 {
                     "name": "constant.numeric.binary.qplus",
-                    "match": "\\b0b[01_]+\\b"
+                    "match": "0[bB][01_]+"
                 },
                 {
                     "name": "constant.numeric.octal.qplus",
-                    "match": "\\b0o[0-7_]+\\b"
+                    "match": "0[oO][0-7_]+"
                 },
                 {
                     "name": "constant.numeric.float.qplus",
-                    "match": "\\b[0-9_]+\\.[0-9_]+([eE][+-]?[0-9_]+)?(f32|f64)?\\b"
+                    "match": "\\b[0-9][0-9_]*\\.[0-9_]+([eE][+-]?[0-9_]+)?"
                 },
                 {
-                    "name": "constant.numeric.decimal.qplus",
-                    "match": "\\b[0-9_]+(u8|i8|u16|i16|u32|i32|u64|i64|usize|isize)?\\b"
-                }
-            ]
-        },
-        "macros": {
-            "patterns": [
-                {
-                    "name": "support.function.macro.qplus",
-                    "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*!"
-                }
-            ]
-        },
-        "attributes": {
-            "patterns": [
-                {
-                    "name": "meta.attribute.qplus",
-                    "begin": "#\\[",
-                    "end": "\\]",
-                    "patterns": [
-                        {
-                            "name": "entity.other.attribute-name.qplus",
-                            "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\b"
-                        },
-                        {
-                            "include": "#strings"
-                        },
-                        {
-                            "include": "#numbers"
-                        }
-                    ]
+                    "name": "constant.numeric.integer.qplus",
+                    "match": "\\b[0-9][0-9_]*\\b"
                 }
             ]
         },
@@ -110,62 +102,75 @@
                     "match": "\\b(if|else|match|for|while|loop|return|break|continue|defer|in)\\b"
                 },
                 {
+                    "name": "keyword.declaration.qplus",
+                    "match": "\\b(fn|let|const|static|mut|pub|mod|module|import|use|type|struct|enum|impl|trait|where|extern)\\b"
+                },
+                {
+                    "name": "keyword.os.qplus",
+                    "match": "\\b(unsafe|driver|syscall|interrupt|asm|mmio|port|volatile|repr|kernel)\\b"
+                },
+                {
+                    "name": "keyword.memory.qplus",
+                    "match": "\\b(ptr|own|ref|as|in)\\b"
+                },
+                {
+                    "name": "constant.language.qplus",
+                    "match": "\\b(true|false|null|None|Some|Ok|Err|self|Self)\\b"
+                },
+                {
                     "name": "keyword.other.qplus",
-                    "match": "\\b(as|unsafe|safe|import|module)\\b"
-                },
-                {
-                    "name": "storage.type.qplus",
-                    "match": "\\b(fn|let|const|struct|enum|union|trait|impl|type|driver|syscall|interrupt|static)\\b"
-                },
-                {
-                    "name": "storage.modifier.qplus",
-                    "match": "\\b(pub|mut|own|ptr|ref|slice|volatile|mmio|port)\\b"
-                },
-                {
-                    "name": "constant.language.bool.qplus",
-                    "match": "\\b(true|false)\\b"
-                },
-                {
-                    "name": "constant.language.null.qplus",
-                    "match": "\\bnull\\b"
-                },
-                {
-                    "name": "variable.language.self.qplus",
-                    "match": "\\b(self|Self|kernel)\\b"
+                    "match": "\\b(and|or|not)\\b"
                 }
             ]
         },
         "types": {
+            "name": "support.type.primitive.qplus",
+            "match": "\\b(u8|u16|u32|u64|u128|i8|i16|i32|i64|i128|f32|f64|bool|char|str|void|usize|isize|never)\\b"
+        },
+        "unsafe_block": {
+            "name": "meta.block.unsafe.qplus",
+            "begin": "\\bunsafe\\s*\\{",
+            "end": "\\}",
+            "beginCaptures": { "0": { "name": "keyword.os.qplus" } },
+            "patterns": [{ "include": "$self" }]
+        },
+        "asm_macro": {
+            "name": "meta.macro.asm.qplus",
+            "begin": "\\basm!\\s*\\(",
+            "end": "\\)",
+            "beginCaptures": { "0": { "name": "keyword.os.qplus" } },
             "patterns": [
-                {
-                    "name": "support.type.primitive.qplus",
-                    "match": "\\b(u8|i8|u16|i16|u32|i32|u64|i64|usize|isize|f32|f64|bool|char|void)\\b"
-                },
-                {
-                    "name": "entity.name.type.qplus",
-                    "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
-                }
+                { "include": "#strings" }
             ]
         },
         "functions": {
             "patterns": [
                 {
                     "name": "entity.name.function.qplus",
-                    "match": "\\b[a-z_][a-zA-Z0-9_]*(?=\\s*\\()"
+                    "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()"
+                },
+                {
+                    "name": "entity.name.type.qplus",
+                    "match": "\\b([A-Z][a-zA-Z0-9_]*)\\b"
                 }
             ]
         },
         "operators": {
+            "name": "keyword.operator.qplus",
+            "match": "(->|=>|::|\\.\\.=|\\.\\.|-=|\\+=|\\*=|/=|%=|&=|\\|=|\\^=|<<=|>>=|==|!=|<=|>=|<<|>>|&&|\\|\\||[+\\-*/%&|^~!?<>=])"
+        },
+        "punctuation": {
             "patterns": [
-                {
-                    "name": "keyword.operator.logical.qplus",
-                    "match": "\\b(and|or|not)\\b"
-                },
-                {
-                    "name": "keyword.operator.qplus",
-                    "match": "(\\+|-|\\*|/|%|==|!=|<|>|<=|>=|=|\\|\\||&&|!|\\?|\\^|&|\\||<<|>>|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|<<=|>>=|\\.\\.|\\.\\.=)"
-                }
+                { "name": "punctuation.separator.qplus",           "match": "[:,]" },
+                { "name": "punctuation.terminator.statement.qplus","match": ";" },
+                { "name": "punctuation.definition.block.qplus",    "match": "[{}]" },
+                { "name": "punctuation.definition.group.qplus",    "match": "[()]" },
+                { "name": "punctuation.definition.array.qplus",    "match": "\\[\\]" }
             ]
+        },
+        "identifiers": {
+            "name": "variable.other.qplus",
+            "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
         }
     }
 }

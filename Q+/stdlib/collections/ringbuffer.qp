@@ -1,0 +1,56 @@
+// Q+ Standard Library — Ring Buffer (lock-free SPSC, stack-allocated)
+// module: qpstd::collections::ringbuffer
+
+module qpstd::collections::ringbuffer;
+
+// RingBuffer<T, N>: capacity N, no heap allocation, power-of-2 size recommended.
+// SPSC-safe (Single Producer Single Consumer) when head/tail are u32.
+
+pub struct RingBuffer<T, N: usize> {
+    buf:  [T; N],
+    head: u32,  // write index
+    tail: u32,  // read index
+    len:  u32,
+}
+
+impl<T, N: usize> RingBuffer<T, N> {
+    pub fn new() -> RingBuffer<T, N> {
+        return RingBuffer {
+            buf:  [0 as T; N],
+            head: 0,
+            tail: 0,
+            len:  0,
+        };
+    }
+
+    pub fn is_empty(self: &Self) -> bool { return self.len == 0; }
+    pub fn is_full(self: &Self)  -> bool { return self.len as usize >= N; }
+    pub fn count(self: &Self)    -> u32  { return self.len; }
+
+    pub fn push(self: &mut Self, val: T) -> bool {
+        if self.is_full() { return false; }
+        self.buf[self.head as usize % N] = val;
+        self.head += 1;
+        self.len  += 1;
+        return true;
+    }
+
+    pub fn pop(self: &mut Self) -> Option<T> {
+        if self.is_empty() { return None; }
+        let val: T = self.buf[self.tail as usize % N];
+        self.tail += 1;
+        self.len  -= 1;
+        return Some(val);
+    }
+
+    pub fn peek(self: &Self) -> Option<T> {
+        if self.is_empty() { return None; }
+        return Some(self.buf[self.tail as usize % N]);
+    }
+
+    pub fn clear(self: &mut Self) -> void {
+        self.head = 0;
+        self.tail = 0;
+        self.len  = 0;
+    }
+}

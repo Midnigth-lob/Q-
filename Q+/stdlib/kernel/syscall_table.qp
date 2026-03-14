@@ -1,0 +1,123 @@
+// Q+ Standard Library — Syscall Dispatch Table
+// module: qpstd::kernel::syscall_table
+//
+// When userland issues `syscall`, the CPU jumps to the LSTAR-registered
+// handler which reads RAX (syscall number) and dispatches here.
+// Calling convention (x86_64 Linux-compatible):
+//   RAX = syscall number
+//   RDI, RSI, RDX, R10, R8, R9 = arguments 1-6
+//   Return value in RAX
+
+module qpstd::kernel::syscall_table;
+
+// ── Syscall numbers ───────────────────────────────────────────
+pub const SYS_EXIT:        u64 = 0;
+pub const SYS_READ:        u64 = 1;
+pub const SYS_WRITE:       u64 = 2;
+pub const SYS_OPEN:        u64 = 3;
+pub const SYS_CLOSE:       u64 = 4;
+pub const SYS_MMAP:        u64 = 5;
+pub const SYS_MUNMAP:      u64 = 6;
+pub const SYS_FORK:        u64 = 7;
+pub const SYS_EXEC:        u64 = 8;
+pub const SYS_WAIT:        u64 = 9;
+pub const SYS_GETPID:      u64 = 10;
+pub const SYS_GETTID:      u64 = 11;
+pub const SYS_KILL:        u64 = 12;
+pub const SYS_SLEEP:       u64 = 13;
+pub const SYS_YIELD:       u64 = 14;
+pub const SYS_BRKO:        u64 = 15;
+pub const SYS_SOCKET:      u64 = 16;
+pub const SYS_SEND:        u64 = 17;
+pub const SYS_RECV:        u64 = 18;
+pub const SYS_IOCTL:       u64 = 19;
+pub const SYS_CHDIR:       u64 = 20;
+pub const SYS_GETCWD:      u64 = 21;
+pub const SYS_MKDIR:       u64 = 22;
+pub const SYS_UNLINK:      u64 = 23;
+pub const SYS_STAT:        u64 = 24;
+pub const SYS_DUP2:        u64 = 25;
+pub const SYS_PIPE:        u64 = 26;
+pub const SYSCALL_COUNT:   usize = 27;
+
+// ── Error codes ────────────────────────────────────────────────
+pub const ESUCCESS: i64 = 0;
+pub const EPERM:    i64 = -1;
+pub const ENOENT:   i64 = -2;
+pub const EINTR:    i64 = -4;
+pub const EIO:      i64 = -5;
+pub const ENOMEM:   i64 = -12;
+pub const EACCES:   i64 = -13;
+pub const EFAULT:   i64 = -14;
+pub const EBUSY:    i64 = -16;
+pub const EINVAL:   i64 = -22;
+pub const ENFILE:   i64 = -23;
+pub const ENOSYS:   i64 = -38;
+
+// ── Syscall handler function pointer type ─────────────────────
+pub type SyscallFn = fn(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64;
+
+// ── Syscall table ─────────────────────────────────────────────
+static mut SYSCALL_TABLE: [SyscallFn; SYSCALL_COUNT] = [null_syscall; SYSCALL_COUNT];
+
+fn null_syscall(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> i64 {
+    return ENOSYS;
+}
+
+// Register a handler for a syscall number
+pub fn register_syscall(num: u64, handler: SyscallFn) -> bool {
+    if num as usize >= SYSCALL_COUNT { return false; }
+    unsafe { SYSCALL_TABLE[num as usize] = handler; }
+    return true;
+}
+
+// ── Main dispatch — called from the assembly SYSCALL stub ──────
+#[no_mangle]
+pub fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
+    if num as usize >= SYSCALL_COUNT { return ENOSYS; }
+    unsafe {
+        let handler: SyscallFn = SYSCALL_TABLE[num as usize];
+        return handler(a1, a2, a3, a4, a5, a6);
+    }
+}
+
+// ── SYSCALL MSR setup (called once during kernel init) ────────
+pub const IA32_STAR:  u32 = 0xC000_0081;
+pub const IA32_LSTAR: u32 = 0xC000_0082;
+pub const IA32_SFMASK: u32 = 0xC000_0084;
+
+extern fn __syscall_entry() -> void;  // assembly trampoline in boot.S
+
+pub fn init_syscalls() -> void {
+    // Set CS/SS for syscall/sysret
+    // STAR[63:48]=sysret_cs, STAR[47:32]=syscall_cs
+    let star: u64 = ((0x1Bu64) << 48) | ((0x08u64) << 32);
+    unsafe {
+        // Write STAR
+        asm!(
+            "mov ecx, {msr}",
+            "wrmsr",
+            msr = const IA32_STAR,
+            in("eax") (star & 0xFFFF_FFFF) as u32,
+            in("edx") (star >> 32) as u32,
+        );
+        // Write LSTAR = address of assembly syscall entry
+        let entry_lo: u32 = (__syscall_entry as u64 & 0xFFFF_FFFF) as u32;
+        let entry_hi: u32 = (__syscall_entry as u64 >> 32) as u32;
+        asm!(
+            "mov ecx, {msr}",
+            "wrmsr",
+            msr = const IA32_LSTAR,
+            in("eax") entry_lo,
+            in("edx") entry_hi,
+        );
+        // SFMASK: clear IF on syscall entry
+        asm!(
+            "mov ecx, {msr}",
+            "wrmsr",
+            msr = const IA32_SFMASK,
+            in("eax") 0x200u32,  // mask IF
+            in("edx") 0u32,
+        );
+    }
+}

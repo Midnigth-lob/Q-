@@ -1,0 +1,103 @@
+// Q+ Standard Library — Memory Allocators
+// module: qpstd::mem::allocator
+
+module qpstd::mem::allocator;
+
+// ── Allocator trait ──────────────────────────────────────────────
+
+pub trait Allocator {
+    fn alloc(self: &mut Self, size: usize, align: usize) -> ptr<u8>;
+    fn free(self: &mut Self, ptr: ptr<u8>, size: usize);
+}
+
+// ── Bump Allocator (linear, no-free, ideal for boot stage) ───────
+
+pub struct BumpAllocator {
+    pub base:   usize,   // Start of the managed region
+    pub limit:  usize,   // End of the managed region (exclusive)
+    pub cursor: usize,   // Next free byte
+}
+
+impl BumpAllocator {
+    pub fn new(base: usize, size: usize) -> BumpAllocator {
+        return BumpAllocator {
+            base:   base,
+            limit:  base + size,
+            cursor: base,
+        };
+    }
+
+    pub fn alloc(self: &mut Self, size: usize, align: usize) -> ptr<u8> {
+        // Align up cursor
+        let aligned: usize = (self.cursor + align - 1) & ~(align - 1);
+        if aligned + size > self.limit {
+            return null;  // Out of memory
+        }
+        let result: usize = aligned;
+        self.cursor = aligned + size;
+        return result as ptr<u8>;
+    }
+
+    // Bump allocator does not support individual frees
+    pub fn free(self: &mut Self, _p: ptr<u8>, _size: usize) -> void {}
+
+    pub fn used(self: &Self) -> usize {
+        return self.cursor - self.base;
+    }
+
+    pub fn remaining(self: &Self) -> usize {
+        return self.limit - self.cursor;
+    }
+
+    pub fn reset(self: &mut Self) -> void {
+        self.cursor = self.base;
+    }
+}
+
+// ── Slab Allocator (fixed-size blocks, O(1) alloc/free) ──────────
+
+const SLAB_MAGIC: u32 = 0xDEADBEEF;
+const SLAB_MAX_BLOCKS: usize = 1024;
+
+pub struct SlabAllocator {
+    pub block_size: usize,
+    pub total:      usize,
+    pub free_count: usize,
+    free_list:      ptr<usize>,  // stack of free indices
+    memory:         ptr<u8>,
+}
+
+impl SlabAllocator {
+    pub fn new(memory: ptr<u8>, block_size: usize, count: usize) -> SlabAllocator {
+        // free_list stored at the start of memory
+        let fl: ptr<usize> = memory as ptr<usize>;
+        let mut i: usize = 0;
+        while i < count {
+            unsafe { *(fl + i) = i; }
+            i += 1;
+        }
+        return SlabAllocator {
+            block_size: block_size,
+            total:      count,
+            free_count: count,
+            free_list:  fl,
+            memory:     memory + (count * 8),  // skip free list
+        };
+    }
+
+    pub fn alloc(self: &mut Self) -> ptr<u8> {
+        if self.free_count == 0 {
+            return null;
+        }
+        self.free_count -= 1;
+        let idx: usize = unsafe { *(self.free_list + self.free_count) };
+        return self.memory + (idx * self.block_size);
+    }
+
+    pub fn free(self: &mut Self, p: ptr<u8>) -> void {
+        let offset: usize = (p as usize) - (self.memory as usize);
+        let idx: usize = offset / self.block_size;
+        unsafe { *(self.free_list + self.free_count) = idx; }
+        self.free_count += 1;
+    }
+}

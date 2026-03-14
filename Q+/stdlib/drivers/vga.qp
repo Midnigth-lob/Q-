@@ -1,0 +1,139 @@
+// Q+ Standard Library — VGA Text Mode Driver
+// module: qpstd::drivers::vga
+
+module qpstd::drivers::vga;
+
+// ── VGA text buffer: 80x25 characters at 0xB8000 ─────────────────
+
+pub const VGA_COLS:  usize = 80;
+pub const VGA_ROWS:  usize = 25;
+pub const VGA_BASE:  usize = 0xB8000;
+
+// ── Color codes (4-bit) ───────────────────────────────────────────
+
+pub const COLOR_BLACK:          u8 = 0;
+pub const COLOR_BLUE:           u8 = 1;
+pub const COLOR_GREEN:          u8 = 2;
+pub const COLOR_CYAN:           u8 = 3;
+pub const COLOR_RED:            u8 = 4;
+pub const COLOR_MAGENTA:        u8 = 5;
+pub const COLOR_BROWN:          u8 = 6;
+pub const COLOR_LIGHT_GRAY:     u8 = 7;
+pub const COLOR_DARK_GRAY:      u8 = 8;
+pub const COLOR_LIGHT_BLUE:     u8 = 9;
+pub const COLOR_LIGHT_GREEN:    u8 = 10;
+pub const COLOR_LIGHT_CYAN:     u8 = 11;
+pub const COLOR_LIGHT_RED:      u8 = 12;
+pub const COLOR_LIGHT_MAGENTA:  u8 = 13;
+pub const COLOR_YELLOW:         u8 = 14;
+pub const COLOR_WHITE:          u8 = 15;
+
+pub fn vga_color(fg: u8, bg: u8) -> u8 {
+    return fg | (bg << 4);
+}
+
+// ── VGA Entry ────────────────────────────────────────────────────
+
+pub fn vga_entry(ch: u8, color: u8) -> u16 {
+    return (ch as u16) | ((color as u16) << 8);
+}
+
+// ── VGA Buffer Driver ────────────────────────────────────────────
+
+pub driver VGABuffer {
+    buf:     ptr<volatile u16>,  // MMIO pointer
+    row:     usize,
+    col:     usize,
+    color:   u8,
+
+    pub fn get() -> VGABuffer {
+        return VGABuffer {
+            buf:   VGA_BASE as ptr<volatile u16>,
+            row:   0,
+            col:   0,
+            color: vga_color(COLOR_WHITE, COLOR_BLACK),
+        };
+    }
+
+    pub fn set_color(self: &mut Self, color: u8) -> void {
+        self.color = color;
+    }
+
+    pub fn clear(self: &mut Self, color: u8) -> void {
+        let entry: u16 = vga_entry(' ' as u8, color);
+        let mut i: usize = 0;
+        while i < VGA_ROWS * VGA_COLS {
+            unsafe { *(self.buf + i) = entry; }
+            i += 1;
+        }
+        self.row = 0;
+        self.col = 0;
+    }
+
+    pub fn write_at(self: &mut Self, row: usize, col: usize, ch: u8, color: u8) -> void {
+        let idx: usize = row * VGA_COLS + col;
+        unsafe { *(self.buf + idx) = vga_entry(ch, color); }
+    }
+
+    pub fn put_char(self: &mut Self, ch: u8) -> void {
+        if ch == '\n' as u8 {
+            self.col = 0;
+            self.row += 1;
+            if self.row >= VGA_ROWS { self.scroll(); }
+            return;
+        }
+        if ch == '\r' as u8 { self.col = 0; return; }
+        self.write_at(self.row, self.col, ch, self.color);
+        self.col += 1;
+        if self.col >= VGA_COLS {
+            self.col = 0;
+            self.row += 1;
+            if self.row >= VGA_ROWS { self.scroll(); }
+        }
+    }
+
+    pub fn write(self: &mut Self, s: &str) -> void {
+        let mut i: usize = 0;
+        while i < s.length {
+            self.put_char(s.data[i] as u8);
+            i += 1;
+        }
+    }
+
+    pub fn write_hex(self: &mut Self, val: u64) -> void {
+        self.write("0x");
+        let mut shift: i32 = 60;
+        while shift >= 0 {
+            let nibble: u8 = ((val >> (shift as u64)) & 0xF) as u8;
+            if nibble < 10 { self.put_char('0' as u8 + nibble); }
+            else            { self.put_char('A' as u8 + nibble - 10); }
+            shift -= 4;
+        }
+    }
+
+    fn scroll(self: &mut Self) -> void {
+        // Move all rows up by one
+        let mut row: usize = 1;
+        while row < VGA_ROWS {
+            let mut col: usize = 0;
+            while col < VGA_COLS {
+                let src_idx: usize = row * VGA_COLS + col;
+                let dst_idx: usize = (row - 1) * VGA_COLS + col;
+                unsafe {
+                    *(self.buf + dst_idx) = *(self.buf + src_idx);
+                }
+                col += 1;
+            }
+            row += 1;
+        }
+        // Clear last row
+        let blank: u16 = vga_entry(' ' as u8, self.color);
+        let mut col: usize = 0;
+        while col < VGA_COLS {
+            let idx: usize = (VGA_ROWS - 1) * VGA_COLS + col;
+            unsafe { *(self.buf + idx) = blank; }
+            col += 1;
+        }
+        self.row = VGA_ROWS - 1;
+    }
+}

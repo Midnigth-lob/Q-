@@ -1,0 +1,214 @@
+// Q+ Standard Library — FAT32 Filesystem Driver
+// module: qpstd::fs::fat32
+//
+// Read-only FAT32 implementation over an AtaDisk.
+// Supports: mount, open, read, readdir.
+
+module qpstd::fs::fat32;
+
+import qpstd::drivers::disk;
+import qpstd::util::string;
+
+// ── FAT32 on-disk structures ───────────────────────────────────
+
+#[repr(C, packed)]
+pub struct Fat32Bpb {       // BIOS Parameter Block (first 512 bytes of volume)
+    jump_boot:     [u8; 3],
+    oem_name:      [u8; 8],
+    bytes_per_sec: u16,
+    sec_per_clus:  u8,
+    rsvd_sec_cnt:  u16,
+    num_fats:      u8,
+    root_ent_cnt:  u16,     // 0 for FAT32
+    tot_sec16:     u16,     // 0 for FAT32
+    media:         u8,
+    fat_sz16:      u16,     // 0 for FAT32
+    sec_per_trk:   u16,
+    num_heads:     u16,
+    hidd_sec:      u32,
+    tot_sec32:     u32,
+    // FAT32 extended
+    fat_sz32:      u32,
+    ext_flags:     u16,
+    fs_ver:        u16,
+    root_clus:     u32,     // cluster of root directory
+    fs_info:       u16,
+    bk_boot_sec:   u16,
+    reserved:      [u8; 12],
+    drv_num:       u8,
+    reserved1:     u8,
+    boot_sig:      u8,
+    vol_id:        u32,
+    vol_lab:       [u8; 11],
+    fil_sys_type:  [u8; 8],
+}
+
+#[repr(C, packed)]
+pub struct Fat32DirEntry {
+    name:      [u8; 11],  // 8.3 format, space-padded
+    attr:      u8,
+    nt_res:    u8,
+    crt_time_tenth: u8,
+    crt_time:  u16,
+    crt_date:  u16,
+    lst_acc_date: u16,
+    fst_clus_hi: u16,
+    wrt_time:  u16,
+    wrt_date:  u16,
+    fst_clus_lo: u16,
+    file_size: u32,
+}
+
+pub const ATTR_READ_ONLY: u8 = 0x01;
+pub const ATTR_HIDDEN:    u8 = 0x02;
+pub const ATTR_SYSTEM:    u8 = 0x04;
+pub const ATTR_VOL_ID:    u8 = 0x08;
+pub const ATTR_DIRECTORY: u8 = 0x10;
+pub const ATTR_ARCHIVE:   u8 = 0x20;
+pub const ATTR_LFN:       u8 = 0x0F;  // Long file name entry
+
+pub const FAT32_EOC: u32 = 0x0FFF_FFF8;  // End of cluster chain
+
+// ── FAT32 Volume state ────────────────────────────────────────
+pub struct Fat32Vol {
+    disk:          *const disk::AtaDisk,
+    bytes_per_sec: u32,
+    sec_per_clus:  u32,
+    fat_start_sec: u32,  // LBA of first FAT
+    data_start_sec: u32, // LBA of first data sector (cluster 2)
+    root_clus:     u32,
+    total_clusters: u32,
+    valid:         bool,
+}
+
+impl Fat32Vol {
+    pub fn new() -> Fat32Vol {
+        return Fat32Vol {
+            disk: null,
+            bytes_per_sec: 0,
+            sec_per_clus: 0,
+            fat_start_sec: 0,
+            data_start_sec: 0,
+            root_clus: 0,
+            total_clusters: 0,
+            valid: false,
+        };
+    }
+
+    // Mount: read BPB and compute geometry
+    pub fn mount(self: &mut Self, disk: *const disk::AtaDisk) -> bool {
+        self.disk = disk;
+        let mut sector_buf: [u8; 512] = [0; 512];
+        if !unsafe { (*disk).read_sectors(0, 1, sector_buf.as_mut_ptr()) } { return false; }
+
+        let bpb: *const Fat32Bpb = sector_buf.as_ptr() as *const Fat32Bpb;
+        unsafe {
+            self.bytes_per_sec = (*bpb).bytes_per_sec as u32;
+            self.sec_per_clus  = (*bpb).sec_per_clus as u32;
+            let fat_sz: u32    = (*bpb).fat_sz32;
+            self.fat_start_sec = (*bpb).rsvd_sec_cnt as u32;
+            self.data_start_sec = self.fat_start_sec
+                + (*bpb).num_fats as u32 * fat_sz;
+            self.root_clus     = (*bpb).root_clus;
+            self.total_clusters = ((*bpb).tot_sec32 - self.data_start_sec) / self.sec_per_clus;
+        }
+        self.valid = true;
+        return true;
+    }
+
+    // Convert cluster number to first sector LBA
+    fn cluster_to_lba(self: &Self, cluster: u32) -> u32 {
+        return self.data_start_sec + (cluster - 2) * self.sec_per_clus;
+    }
+
+    // Read the next cluster from the FAT chain
+    fn fat_next(self: &Self, cluster: u32) -> u32 {
+        // Each FAT entry = 4 bytes; sector that contains fat[cluster]
+        let fat_offset: u32 = cluster * 4;
+        let fat_sector: u32 = self.fat_start_sec + fat_offset / self.bytes_per_sec;
+        let ent_offset: usize = (fat_offset % self.bytes_per_sec) as usize;
+
+        let mut buf: [u8; 512] = [0; 512];
+        unsafe { (*self.disk).read_sectors(fat_sector, 1, buf.as_mut_ptr()); }
+
+        let entry: u32 = (buf[ent_offset] as u32)
+            | ((buf[ent_offset + 1] as u32) << 8)
+            | ((buf[ent_offset + 2] as u32) << 16)
+            | ((buf[ent_offset + 3] as u32) << 24);
+        return entry & 0x0FFF_FFFF;
+    }
+
+    // Read a full cluster into `buf` (buf must be >= bytes_per_sec * sec_per_clus)
+    pub fn read_cluster(self: &Self, cluster: u32, buf: *mut u8) -> bool {
+        if !self.valid { return false; }
+        let lba: u32 = self.cluster_to_lba(cluster);
+        let sectors: u8 = self.sec_per_clus as u8;
+        return unsafe { (*self.disk).read_sectors(lba, sectors, buf) };
+    }
+
+    // Lookup a file in the root directory by 8.3 name (11 chars, uppercase, padded)
+    // Returns (first_cluster, file_size) or (0, 0) if not found
+    pub fn lookup_root(self: &Self, name83: &[u8; 11]) -> (u32, u32) {
+        let mut cluster: u32 = self.root_clus;
+        let cluster_bytes: usize = (self.bytes_per_sec * self.sec_per_clus) as usize;
+        let mut cluster_buf: [u8; 4096] = [0; 4096]; // handles up to 8 sec/cluster
+
+        loop {
+            if !self.read_cluster(cluster, cluster_buf.as_mut_ptr()) { break; }
+            let entries_per_cluster: usize = cluster_bytes / 32;
+            for i in 0..entries_per_cluster {
+                let de: *const Fat32DirEntry = unsafe {
+                    (cluster_buf.as_ptr().add(i * 32)) as *const Fat32DirEntry
+                };
+                let first_byte: u8 = unsafe { (*de).name[0] };
+                if first_byte == 0x00 { return (0, 0); }  // end of directory
+                if first_byte == 0xE5 { continue; }        // deleted entry
+                if unsafe { (*de).attr } == ATTR_LFN { continue; }  // LFN entry
+
+                // Compare 11-byte name
+                let mut match_: bool = true;
+                for j in 0..11 {
+                    if unsafe { (*de).name[j] } != name83[j] { match_ = false; break; }
+                }
+                if match_ {
+                    let clus: u32 = unsafe {
+                        ((*de).fst_clus_hi as u32) << 16 | (*de).fst_clus_lo as u32
+                    };
+                    let size: u32 = unsafe { (*de).file_size };
+                    return (clus, size);
+                }
+            }
+            // Follow FAT chain
+            let next: u32 = self.fat_next(cluster);
+            if next >= FAT32_EOC { break; }
+            cluster = next;
+        }
+        return (0, 0);
+    }
+
+    // Read file contents into `buf` (up to `buf_len` bytes)
+    pub fn read_file(self: &Self, first_cluster: u32, file_size: u32, buf: *mut u8, buf_len: usize) -> usize {
+        let mut cluster: u32 = first_cluster;
+        let cluster_bytes: usize = (self.bytes_per_sec * self.sec_per_clus) as usize;
+        let read_total: usize = if file_size as usize < buf_len { file_size as usize } else { buf_len };
+        let mut read_so_far: usize = 0;
+        let mut cluster_buf: [u8; 4096] = [0; 4096];
+
+        while cluster < FAT32_EOC && read_so_far < read_total {
+            if !self.read_cluster(cluster, cluster_buf.as_mut_ptr()) { break; }
+            let to_copy: usize = if cluster_bytes < (read_total - read_so_far) {
+                cluster_bytes
+            } else {
+                read_total - read_so_far
+            };
+            unsafe {
+                core::ptr::copy_nonoverlapping(cluster_buf.as_ptr(), buf.add(read_so_far), to_copy);
+            }
+            read_so_far += to_copy;
+            cluster = self.fat_next(cluster);
+        }
+        return read_so_far;
+    }
+
+    pub fn is_valid(self: &Self) -> bool { return self.valid; }
+}

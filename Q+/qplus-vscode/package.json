@@ -1,35 +1,160 @@
 {
     "name": "qplus",
     "displayName": "Q+ Language Support",
-    "description": "Syntax highlighting and language features for the Q+ OS Programming Language",
-    "version": "0.1.0",
+    "description": "Full IDE support for the Q+ OS Programming Language: syntax highlighting, IntelliSense, LSP, AI autocomplete, security analysis, debugger integration.",
+    "version": "0.3.0",
     "publisher": "QPlusTeam",
-    "engines": {
-        "vscode": "^1.74.0"
-    },
-    "categories": [
-        "Programming Languages"
+    "repository": { "type": "git", "url": "https://github.com/QPlusOS/qplus-vscode" },
+    "license": "MIT",
+    "engines": { "vscode": "^1.74.0" },
+    "categories": ["Programming Languages", "Linters", "Debuggers", "Snippets"],
+    "activationEvents": [
+        "onLanguage:qplus",
+        "workspaceContains:**/*.qp"
     ],
+    "main": "./out/extension.js",
     "contributes": {
-        "languages": [
+        "languages": [{
+            "id": "qplus",
+            "aliases": ["Q+", "qplus"],
+            "extensions": [".qp"],
+            "configuration": "./language-configuration.json"
+        }],
+        "grammars": [{
+            "language": "qplus",
+            "scopeName": "source.qplus",
+            "path": "./syntaxes/qplus.tmLanguage.json"
+        }],
+        "snippets": [{
+            "language": "qplus",
+            "path": "./snippets/qplus.json"
+        }],
+        "commands": [
             {
-                "id": "qplus",
-                "aliases": [
-                    "Q+",
-                    "qplus"
-                ],
-                "extensions": [
-                    ".qp"
-                ],
-                "configuration": "./language-configuration.json"
+                "command": "qplus.compile",
+                "title": "Q+: Compile Current File",
+                "icon": "$(play)"
+            },
+            {
+                "command": "qplus.analyze",
+                "title": "Q+: Run Security Analysis",
+                "icon": "$(shield)"
+            },
+            {
+                "command": "qplus.buildKernel",
+                "title": "Q+: Build OS Kernel",
+                "icon": "$(package)"
+            },
+            {
+                "command": "qplus.runQemu",
+                "title": "Q+: Run in QEMU",
+                "icon": "$(vm)"
+            },
+            {
+                "command": "qplus.aiSuggest",
+                "title": "Q+: AI Code Suggestion",
+                "icon": "$(sparkle)"
             }
         ],
-        "grammars": [
+        "keybindings": [
             {
-                "language": "qplus",
-                "scopeName": "source.qplus",
-                "path": "./syntaxes/qplus.tmLanguage.json"
+                "command": "qplus.compile",
+                "key": "ctrl+shift+b",
+                "when": "resourceExtname == .qp"
+            },
+            {
+                "command": "qplus.aiSuggest",
+                "key": "tab",
+                "when": "resourceExtname == .qp && suggestWidgetVisible"
+            }
+        ],
+        "configuration": {
+            "title": "Q+ Language",
+            "properties": {
+                "qplus.compilerPath": {
+                    "type": "string",
+                    "default": "qpc",
+                    "description": "Path to the Q+ compiler (qpc)"
+                },
+                "qplus.aiEngine.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable the built-in AST-based AI autocomplete engine"
+                },
+                "qplus.aiEngine.serverPort": {
+                    "type": "number",
+                    "default": 7777,
+                    "description": "Port for the local AI engine server (ai_engine/server.py)"
+                },
+                "qplus.byok.provider": {
+                    "type": "string",
+                    "enum": ["none", "openai", "anthropic", "elite"],
+                    "default": "none",
+                    "description": "BYOK (Bring Your Own Key) provider for the elite model"
+                },
+                "qplus.byok.apiKey": {
+                    "type": "string",
+                    "default": "",
+                    "description": "API key for the selected BYOK provider"
+                },
+                "qplus.byok.eliteToken": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Access token for the Q+ Elite private model (server-verified)"
+                },
+                "qplus.security.runOnSave": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Run security analysis automatically on file save"
+                },
+                "qplus.qemu.memory": {
+                    "type": "string",
+                    "default": "128M",
+                    "description": "Memory to allocate to QEMU when running the kernel"
+                },
+                "qplus.stdlibPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Path to the Q+ standard library (stdlib/)"
+                }
+            }
+        },
+        "menus": {
+            "editor/title": [
+                { "command": "qplus.compile",  "when": "resourceExtname == .qp", "group": "navigation" },
+                { "command": "qplus.analyze",  "when": "resourceExtname == .qp", "group": "navigation" },
+                { "command": "qplus.aiSuggest","when": "resourceExtname == .qp", "group": "navigation" }
+            ],
+            "editor/context": [
+                { "command": "qplus.compile",  "when": "resourceExtname == .qp", "group": "qplus" },
+                { "command": "qplus.analyze",  "when": "resourceExtname == .qp", "group": "qplus" },
+                { "command": "qplus.runQemu",  "when": "resourceExtname == .qp", "group": "qplus" }
+            ]
+        },
+        "taskDefinitions": [
+            {
+                "type": "qplus",
+                "properties": {
+                    "task": { "type": "string", "description": "The Q+ task to run" },
+                    "file": { "type": "string", "description": "The .qp file to compile" }
+                }
             }
         ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "pretest": "npm run compile",
+        "package": "vsce package"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.74.0",
+        "@types/node": "^18.0.0",
+        "typescript": "^5.0.0",
+        "@vscode/vsce": "^2.24.0"
+    },
+    "dependencies": {
+        "vscode-languageclient": "^8.0.0"
     }
 }

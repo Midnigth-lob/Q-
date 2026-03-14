@@ -1,0 +1,195 @@
+// Q+ Standard Library — Process & Thread Primitives
+// module: qpstd::kernel::process
+
+module qpstd::kernel::process;
+
+import qpstd::mem::allocator;
+import qpstd::mem::vmm;
+import qpstd::cpu::regs;
+
+// ── Process / Thread states ────────────────────────────────────
+pub enum ProcessState repr(u8) {
+    Ready    = 0,
+    Running  = 1,
+    Blocked  = 2,
+    Zombie   = 3,
+    Dead     = 4,
+}
+
+// ── CPU context saved on a context switch ─────────────────────
+// x86_64 System V ABI callee-saved registers + RIP/RSP
+#[repr(C, packed)]
+pub struct CpuContext {
+    r15:    u64,
+    r14:    u64,
+    r13:    u64,
+    r12:    u64,
+    rbp:    u64,
+    rbx:    u64,
+    rip:    u64,  // return address
+    rsp:    u64,  // stack pointer at switch point
+    rflags: u64,
+    cs:     u64,
+    ss:     u64,
+}
+
+pub const KERNEL_STACK_SIZE: usize = 65536; // 64 KiB kernel stack per thread
+
+// ── Thread control block ───────────────────────────────────────
+pub struct Thread {
+    tid:       u32,
+    pid:       u32,
+    state:     ProcessState,
+    ctx:       CpuContext,
+    kstack:    *mut u8,      // base of kernel stack
+    kstack_top: *mut u8,     // top (high address) of kernel stack
+    priority:  u8,
+    ticks:     u32,          // remaining time-slice ticks
+    next:      *mut Thread,  // intrusive linked-list for runqueues
+}
+
+// ── Process control block ──────────────────────────────────────
+pub struct Process {
+    pid:        u32,
+    ppid:       u32,
+    state:      ProcessState,
+    vmm:        vmm::Vmm,
+    thread_count: u32,
+    threads:    *mut Thread,  // linked list of threads
+    exit_code:  i32,
+    name:       [u8; 64],
+}
+
+// ── Global PID/TID counters ────────────────────────────────────
+static mut NEXT_PID: u32 = 1;
+static mut NEXT_TID: u32 = 1;
+
+pub fn alloc_pid() -> u32 {
+    unsafe {
+        let pid: u32 = NEXT_PID;
+        NEXT_PID += 1;
+        return pid;
+    }
+}
+
+pub fn alloc_tid() -> u32 {
+    unsafe {
+        let tid: u32 = NEXT_TID;
+        NEXT_TID += 1;
+        return tid;
+    }
+}
+
+// ── Thread creation ────────────────────────────────────────────
+// entry: function pointer to thread entry point
+// arg:   opaque argument passed in rdi
+pub fn thread_create(
+    pid:    u32,
+    entry:  fn(arg: u64) -> void,
+    arg:    u64,
+    prio:   u8,
+) -> *mut Thread {
+    // Allocate thread structure
+    let t: *mut Thread = unsafe {
+        allocator::kmalloc(core::mem::size_of::<Thread>()) as *mut Thread
+    };
+    if t == null { return null; }
+
+    // Allocate kernel stack
+    let kstack: *mut u8 = unsafe {
+        allocator::kmalloc(KERNEL_STACK_SIZE) as *mut u8
+    };
+    if kstack == null { return null; }
+
+    let kstack_top: *mut u8 = unsafe { kstack.add(KERNEL_STACK_SIZE) };
+
+    // Set up initial CPU context so that when we switch to this thread,
+    // it starts executing at `entry(arg)`.
+    // We place a fake return frame on the kernel stack.
+    unsafe {
+        // Stack grows downward. Place entry pointer and arg at top.
+        let stack_ptr: *mut u64 = (kstack_top as u64 - 8) as *mut u64;
+        *stack_ptr = entry as u64;
+
+        (*t).ctx = CpuContext {
+            r15: 0, r14: 0, r13: 0, r12: 0, rbp: 0, rbx: 0,
+            rip: entry as u64,
+            rsp: stack_ptr as u64,
+            rflags: 0x202,  // IF=1 (interrupts enabled), reserved bit 1
+            cs:  0x08,       // kernel code segment
+            ss:  0x10,       // kernel data segment
+        };
+        (*t).tid       = alloc_tid();
+        (*t).pid       = pid;
+        (*t).state     = ProcessState::Ready;
+        (*t).kstack    = kstack;
+        (*t).kstack_top = kstack_top;
+        (*t).priority  = prio;
+        (*t).ticks     = prio as u32 * 2 + 2;
+        (*t).next      = null;
+    }
+    return t;
+}
+
+// ── Context switch (assembly stub) ────────────────────────────
+// Saves current CPU context into `from`, loads context from `to`.
+// Implemented in assembly; signature here for reference.
+extern fn context_switch(from: *mut CpuContext, to: *const CpuContext) -> void;
+
+// ── Thread destroy ─────────────────────────────────────────────
+pub fn thread_destroy(t: *mut Thread) -> void {
+    if t == null { return; }
+    unsafe {
+        if (*t).kstack != null {
+            allocator::kfree((*t).kstack as *mut void);
+        }
+        allocator::kfree(t as *mut void);
+    }
+}
+
+// ── Process creation ───────────────────────────────────────────
+pub fn process_create(
+    ppid:   u32,
+    pml4_phys: u64,
+    name:   &[u8],
+) -> *mut Process {
+    let p: *mut Process = unsafe {
+        allocator::kmalloc(core::mem::size_of::<Process>()) as *mut Process
+    };
+    if p == null { return null; }
+    unsafe {
+        (*p).pid    = alloc_pid();
+        (*p).ppid   = ppid;
+        (*p).state  = ProcessState::Ready;
+        (*p).vmm    = vmm::Vmm::init(pml4_phys);
+        (*p).thread_count = 0;
+        (*p).threads = null;
+        (*p).exit_code = 0;
+        // Copy name (truncate to 63 chars)
+        let copy_len: usize = if name.len() < 63 { name.len() } else { 63 };
+        for i in 0..copy_len {
+            (*p).name[i] = name[i];
+        }
+        (*p).name[copy_len] = 0;
+    }
+    return p;
+}
+
+// ── Add thread to process ──────────────────────────────────────
+pub fn process_add_thread(p: *mut Process, t: *mut Thread) -> void {
+    if p == null || t == null { return; }
+    unsafe {
+        (*t).next    = (*p).threads;
+        (*p).threads = t;
+        (*p).thread_count += 1;
+    }
+}
+
+// ── Process exit ───────────────────────────────────────────────
+pub fn process_exit(p: *mut Process, code: i32) -> void {
+    if p == null { return; }
+    unsafe {
+        (*p).exit_code = code;
+        (*p).state = ProcessState::Zombie;
+    }
+}

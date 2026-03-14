@@ -1,0 +1,105 @@
+// Q+ Standard Library — String Utilities (no heap allocation)
+// module: qpstd::util::string
+
+module qpstd::util::string;
+
+// ── str helpers ───────────────────────────────────────────────────
+
+pub fn str_len(s: ptr<u8>) -> usize {
+    let mut n: usize = 0;
+    while unsafe { *(s + n) } != 0 { n += 1; }
+    return n;
+}
+
+pub fn str_eq(a: ptr<u8>, b: ptr<u8>) -> bool {
+    let mut i: usize = 0;
+    loop {
+        let ca: u8 = unsafe { *(a + i) };
+        let cb: u8 = unsafe { *(b + i) };
+        if ca != cb { return false; }
+        if ca == 0  { return true;  }
+        i += 1;
+    }
+}
+
+pub fn str_copy(dst: ptr<u8>, src: ptr<u8>, max: usize) -> usize {
+    let mut i: usize = 0;
+    while i < max - 1 {
+        let ch: u8 = unsafe { *(src + i) };
+        unsafe { *(dst + i) = ch; }
+        if ch == 0 { return i; }
+        i += 1;
+    }
+    unsafe { *(dst + i) = 0; }
+    return i;
+}
+
+pub fn mem_set(dst: ptr<u8>, val: u8, n: usize) -> void {
+    let mut i: usize = 0;
+    while i < n { unsafe { *(dst + i) = val; } i += 1; }
+}
+
+pub fn mem_copy(dst: ptr<u8>, src: ptr<u8>, n: usize) -> void {
+    let mut i: usize = 0;
+    while i < n { unsafe { *(dst + i) = *(src + i); } i += 1; }
+}
+
+pub fn mem_cmp(a: ptr<u8>, b: ptr<u8>, n: usize) -> i32 {
+    let mut i: usize = 0;
+    while i < n {
+        let ca: u8 = unsafe { *(a + i) };
+        let cb: u8 = unsafe { *(b + i) };
+        if ca < cb { return -1; }
+        if ca > cb { return  1; }
+        i += 1;
+    }
+    return 0;
+}
+
+// ── Integer to string conversion (no-alloc, writes to caller buf) ─
+
+pub fn u64_to_str(val: u64, buf: ptr<u8>, base: u32) -> usize {
+    if val == 0 {
+        unsafe { *(buf + 0) = '0' as u8; *(buf + 1) = 0; }
+        return 1;
+    }
+    let digits: [u8; 65] = [0; 65];
+    let mut i: usize = 0;
+    let mut v: u64 = val;
+    while v > 0 {
+        let d: u8 = (v % (base as u64)) as u8;
+        if d < 10 { unsafe { *(digits.ptr + i) = '0' as u8 + d; } }
+        else       { unsafe { *(digits.ptr + i) = 'A' as u8 + d - 10; } }
+        v /= base as u64;
+        i += 1;
+    }
+    // Reverse
+    let len: usize = i;
+    let mut j: usize = 0;
+    while j < len {
+        unsafe { *(buf + j) = *(digits.ptr + (len - 1 - j)); }
+        j += 1;
+    }
+    unsafe { *(buf + len) = 0; }
+    return len;
+}
+
+pub fn i64_to_str(val: i64, buf: ptr<u8>) -> usize {
+    if val < 0 {
+        unsafe { *(buf + 0) = '-' as u8; }
+        return 1 + u64_to_str((-val) as u64, buf + 1, 10);
+    }
+    return u64_to_str(val as u64, buf, 10);
+}
+
+// ── Simple format (no variadic — explicit calls) ───────────────────
+// Usage: sprint(buf, bufsize, "prefix ", then append as needed)
+
+pub fn sprint_u64(buf: ptr<u8>, maxlen: usize, val: u64) -> usize {
+    let tmp: [u8; 32] = [0; 32];
+    let n: usize = u64_to_str(val, tmp.ptr, 10);
+    let copy: usize = if n < maxlen { n } else { maxlen - 1 };
+    mem_copy(buf, tmp.ptr, copy);
+    unsafe { *(buf + copy) = 0; }
+    return copy;
+}

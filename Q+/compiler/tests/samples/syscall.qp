@@ -1,0 +1,43 @@
+// Q+ Test Sample — Syscall declaration and usage
+// Tests: syscall keyword, syscall dispatch, calling convention
+
+module syscall_demo;
+
+import qpstd::kernel::syscall_table;
+import qpstd::drivers::serial;
+
+// ── Define a custom syscall: sys_kprint ───────────────────────
+syscall kprint(msg_ptr: u64, len: u64) -> i64 {
+    let buf: *const u8 = msg_ptr as *const u8;
+    for i in 0..len as usize {
+        serial::serial_write_byte(unsafe { *buf.add(i) });
+    }
+    return len as i64;
+}
+
+// ── Register and test syscalls ─────────────────────────────────
+pub fn demo_syscalls() -> void {
+    // Register the kprint syscall at number 100
+    syscall_table::register_syscall(100, __qp_sys_kprint);
+
+    // Demonstrate calling the dispatch table directly (kernel side)
+    let msg: &str = "kprint syscall works!\n";
+    let result: i64 = syscall_table::syscall_dispatch(
+        100,
+        msg.as_ptr() as u64,
+        msg.len() as u64,
+        0, 0, 0, 0,
+    );
+
+    // result should equal msg.len()
+    if result != msg.len() as i64 {
+        serial::serial_write_str("[ERROR] kprint returned wrong length!\n");
+    } else {
+        serial::serial_write_str("[OK] kprint syscall returned correct length\n");
+    }
+}
+
+// User-mode side: user calls via SYSCALL instruction
+// The compiler generates: mov rax, 100; mov rdi, ptr; mov rsi, len; syscall
+// This is abstracted in Q+ as:
+//   let result = @syscall(100, msg.as_ptr(), msg.len());

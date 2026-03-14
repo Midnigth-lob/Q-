@@ -1,0 +1,152 @@
+// Q+ Standard Library — Safe String Formatting (no heap)
+// module: qpstd::util::fmt
+//
+// Provides a stack-allocated formatter. No malloc.
+// Usage:
+//   let mut f = Fmt::new(buf, buf_size);
+//   f.write_str("hello ");
+//   f.write_u64(42);
+//   let s: &[u8] = f.as_slice();
+
+module qpstd::util::fmt;
+
+pub struct Fmt {
+    buf:  *mut u8,
+    cap:  usize,
+    len:  usize,
+}
+
+impl Fmt {
+    // Initialize with a caller-provided buffer (stack or static)
+    pub fn new(buf: *mut u8, cap: usize) -> Fmt {
+        return Fmt { buf: buf, cap: cap, len: 0 };
+    }
+
+    // Write a single byte
+    pub fn write_byte(self: &mut Self, b: u8) -> bool {
+        if self.len >= self.cap { return false; }
+        unsafe { *self.buf.add(self.len) = b; }
+        self.len += 1;
+        return true;
+    }
+
+    // Write a byte slice
+    pub fn write_bytes(self: &mut Self, data: *const u8, count: usize) -> usize {
+        let available: usize = self.cap - self.len;
+        let to_write: usize = if count < available { count } else { available };
+        unsafe {
+            core::ptr::copy_nonoverlapping(data, self.buf.add(self.len), to_write);
+        }
+        self.len += to_write;
+        return to_write;
+    }
+
+    // Write a null-terminated C string
+    pub fn write_cstr(self: &mut Self, s: *const u8) -> usize {
+        if s == null { return self.write_bytes("(null)".as_ptr(), 6); }
+        let mut len: usize = 0;
+        unsafe { while *s.add(len) != 0 { len += 1; } }
+        return self.write_bytes(s, len);
+    }
+
+    // Write a string literal / slice
+    pub fn write_str(self: &mut Self, s: &str) -> usize {
+        return self.write_bytes(s.as_ptr(), s.len());
+    }
+
+    // Write u64 in decimal
+    pub fn write_u64(self: &mut Self, mut n: u64) -> void {
+        if n == 0 { self.write_byte('0'); return; }
+        let mut tmp: [u8; 20] = [0; 20];
+        let mut i: usize = 20;
+        while n > 0 {
+            i -= 1;
+            tmp[i] = ('0' as u8) + (n % 10) as u8;
+            n /= 10;
+        }
+        self.write_bytes(tmp.as_ptr().add(i), 20 - i);
+    }
+
+    // Write i64 in decimal (with sign)
+    pub fn write_i64(self: &mut Self, n: i64) -> void {
+        if n < 0 {
+            self.write_byte('-' as u8);
+            self.write_u64((-n) as u64);
+        } else {
+            self.write_u64(n as u64);
+        }
+    }
+
+    // Write u64 in hex (lower-case, with 0x prefix)
+    pub fn write_hex(self: &mut Self, n: u64) -> void {
+        self.write_str("0x");
+        if n == 0 { self.write_byte('0'); return; }
+        let digits: [u8; 16] = ['0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f'];
+        let mut tmp: [u8; 16] = [0; 16];
+        let mut i: usize = 16;
+        let mut val: u64 = n;
+        while val > 0 {
+            i -= 1;
+            tmp[i] = digits[(val & 0xF) as usize];
+            val >>= 4;
+        }
+        self.write_bytes(tmp.as_ptr().add(i), 16 - i);
+    }
+
+    // Simple printf-like: supports %s %u %i %x %c %%
+    pub fn printf(self: &mut Self, fmt: *const u8, args: *const u64, arg_count: usize) -> void {
+        let mut fi: usize = 0;
+        let mut ai: usize = 0;
+        unsafe {
+            while *fmt.add(fi) != 0 {
+                let c: u8 = *fmt.add(fi);
+                fi += 1;
+                if c != '%' as u8 {
+                    self.write_byte(c);
+                    continue;
+                }
+                let spec: u8 = *fmt.add(fi);
+                fi += 1;
+                if ai >= arg_count { break; }
+                let arg: u64 = *args.add(ai);
+                ai += 1;
+                match spec as char {
+                    's' => { self.write_cstr(arg as *const u8); }
+                    'u' => { self.write_u64(arg); }
+                    'i' => { self.write_i64(arg as i64); }
+                    'x' => { self.write_hex(arg); }
+                    'c' => { self.write_byte(arg as u8); }
+                    '%' => { self.write_byte('%' as u8); ai -= 1; }
+                    _   => { self.write_byte('?' as u8); }
+                }
+            }
+        }
+    }
+
+    // Null-terminate and return pointer (for use with C functions or VGA)
+    pub fn as_cstr(self: &mut Self) -> *const u8 {
+        if self.len < self.cap { unsafe { *self.buf.add(self.len) = 0; } }
+        return self.buf as *const u8;
+    }
+
+    pub fn as_slice(self: &Self) -> (*const u8, usize) {
+        return (self.buf as *const u8, self.len);
+    }
+
+    pub fn len(self: &Self) -> usize { return self.len; }
+    pub fn is_empty(self: &Self) -> bool { return self.len == 0; }
+
+    pub fn reset(self: &mut Self) -> void { self.len = 0; }
+}
+
+// ── Convenience: format to a static 256-byte buffer ───────────
+// NOT re-entrant. Use only when you just need a quick string.
+static mut STATIC_FMT_BUF: [u8; 256] = [0; 256];
+
+pub fn format_static(fmt: *const u8, args: *const u64, arg_count: usize) -> *const u8 {
+    unsafe {
+        let mut f: Fmt = Fmt::new(STATIC_FMT_BUF.as_mut_ptr(), 256);
+        f.printf(fmt, args, arg_count);
+        return f.as_cstr();
+    }
+}

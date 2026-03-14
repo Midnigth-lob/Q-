@@ -1,0 +1,183 @@
+// Q+ Standard Library — IPC: Mutex, Semaphore, Channel
+// module: qpstd::kernel::ipc
+
+module qpstd::kernel::ipc;
+
+import qpstd::cpu::regs;
+import qpstd::collections::ringbuffer;
+
+// ── Spinlock (busy-wait, interrupt-safe) ──────────────────────
+pub struct Spinlock {
+    locked: u32,  // 0 = free, 1 = held
+}
+
+impl Spinlock {
+    pub fn new() -> Spinlock {
+        return Spinlock { locked: 0 };
+    }
+
+    pub fn acquire(self: &mut Self) -> void {
+        unsafe {
+            loop {
+                // LOCK XCHG: atomic test-and-set
+                let old: u32;
+                asm!(
+                    "lock xchg [{0}], {1:e}",
+                    in(reg)  &self.locked,
+                    inout(reg) 1u32 => old,
+                );
+                if old == 0 { break; }
+                // Pause to reduce bus contention on hyperthreaded cores
+                asm!("pause");
+            }
+        }
+    }
+
+    pub fn release(self: &mut Self) -> void {
+        unsafe {
+            asm!(
+                "lock mov dword ptr [{0}], 0",
+                in(reg) &self.locked,
+            );
+        }
+    }
+
+    pub fn try_acquire(self: &mut Self) -> bool {
+        unsafe {
+            let old: u32;
+            asm!(
+                "lock xchg [{0}], {1:e}",
+                in(reg)  &self.locked,
+                inout(reg) 1u32 => old,
+            );
+            return old == 0;
+        }
+    }
+}
+
+// ── SpinlockGuard (RAII) ──────────────────────────────────────
+pub struct SpinlockGuard<'a> {
+    lock: &'a mut Spinlock,
+}
+
+impl<'a> SpinlockGuard<'a> {
+    pub fn new(lock: &'a mut Spinlock) -> SpinlockGuard<'a> {
+        lock.acquire();
+        return SpinlockGuard { lock: lock };
+    }
+}
+// Guard releases lock when dropped (deferred release pattern)
+
+// ── Counting Semaphore ─────────────────────────────────────────
+pub struct Semaphore {
+    count:  i32,
+    lock:   Spinlock,
+}
+
+impl Semaphore {
+    pub fn new(initial: i32) -> Semaphore {
+        return Semaphore { count: initial, lock: Spinlock::new() };
+    }
+
+    // Wait (P operation): decrement; spin-wait if count <= 0
+    pub fn wait(self: &mut Self) -> void {
+        loop {
+            self.lock.acquire();
+            if self.count > 0 {
+                self.count -= 1;
+                self.lock.release();
+                return;
+            }
+            self.lock.release();
+            unsafe { asm!("pause"); }
+        }
+    }
+
+    // Signal (V operation): increment
+    pub fn signal(self: &mut Self) -> void {
+        self.lock.acquire();
+        self.count += 1;
+        self.lock.release();
+    }
+
+    pub fn try_wait(self: &mut Self) -> bool {
+        self.lock.acquire();
+        if self.count > 0 {
+            self.count -= 1;
+            self.lock.release();
+            return true;
+        }
+        self.lock.release();
+        return false;
+    }
+}
+
+// ── Mutex (binary semaphore with owner tracking) ──────────────
+pub struct Mutex {
+    owner_tid: u32,  // 0 = unlocked
+    sem:       Semaphore,
+}
+
+impl Mutex {
+    pub fn new() -> Mutex {
+        return Mutex { owner_tid: 0, sem: Semaphore::new(1) };
+    }
+
+    pub fn lock(self: &mut Self, tid: u32) -> void {
+        self.sem.wait();
+        self.owner_tid = tid;
+    }
+
+    pub fn unlock(self: &mut Self, tid: u32) -> bool {
+        if self.owner_tid != tid { return false; } // not the owner
+        self.owner_tid = 0;
+        self.sem.signal();
+        return true;
+    }
+
+    pub fn try_lock(self: &mut Self, tid: u32) -> bool {
+        if self.sem.try_wait() {
+            self.owner_tid = tid;
+            return true;
+        }
+        return false;
+    }
+}
+
+// ── IPC Channel (SPSC ring-buffer based, lock-free) ───────────
+// Capacity N must be a power of 2, chosen at compile time.
+pub const CHANNEL_CAPACITY: usize = 64;
+
+pub struct Channel<T> {
+    buf: ringbuffer::RingBuffer<T, CHANNEL_CAPACITY>,
+    lock: Spinlock,
+}
+
+impl<T> Channel<T> {
+    pub fn new() -> Channel<T> {
+        return Channel {
+            buf:  ringbuffer::RingBuffer::new(),
+            lock: Spinlock::new(),
+        };
+    }
+
+    // Send a value; returns false if channel is full
+    pub fn send(self: &mut Self, val: T) -> bool {
+        self.lock.acquire();
+        let ok: bool = self.buf.push(val);
+        self.lock.release();
+        return ok;
+    }
+
+    // Receive a value; returns None if channel is empty
+    pub fn recv(self: &mut Self) -> Option<T> {
+        self.lock.acquire();
+        let result: Option<T> = self.buf.pop();
+        self.lock.release();
+        return result;
+    }
+
+    pub fn is_empty(self: &Self) -> bool { return self.buf.is_empty(); }
+    pub fn is_full(self: &Self)  -> bool { return self.buf.is_full(); }
+    pub fn len(self: &Self)      -> u32  { return self.buf.count(); }
+}

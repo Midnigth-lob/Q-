@@ -1,0 +1,124 @@
+// Q+ OS Demo — Kernel Entry Point
+// module: kernel_main
+//
+// This is the first Q+ code that runs after boot.S sets up long mode.
+// It initializes all subsystems and then enters the idle loop.
+
+module kernel_main;
+
+import qpstd::drivers::vga;
+import qpstd::drivers::serial;
+import qpstd::drivers::timer;
+import qpstd::drivers::keyboard;
+import qpstd::cpu::interrupts;
+import qpstd::mem::allocator;
+import qpstd::mem::paging;
+import qpstd::mem::vmm;
+import qpstd::kernel::scheduler;
+import qpstd::kernel::process;
+import qpstd::kernel::syscall_table;
+import qpstd::util::fmt;
+
+// ── Kernel banner ─────────────────────────────────────────────
+static BANNER: &str =
+    "  ___  _     _\n" +
+    " / _ \\| |_  | |\n" +
+    "| | | | '_ \\| |\n" +
+    "| |_| | |_) |_|\n" +
+    " \\__\\_\\_.__/(_)   Q+ Operating System v0.1\n" +
+    "================================================\n";
+
+// ── Syscall handlers ──────────────────────────────────────────
+fn sys_write(fd: u64, buf_ptr: u64, count: u64, _a4: u64, _a5: u64, _a6: u64) -> i64 {
+    if fd != 1 && fd != 2 { return syscall_table::EINVAL; }
+    let buf: *const u8 = buf_ptr as *const u8;
+    for i in 0..count as usize {
+        let c: u8 = unsafe { *buf.add(i) };
+        serial::serial_write_byte(c);
+        vga::vga_putchar(c as char);
+    }
+    return count as i64;
+}
+
+fn sys_exit(code: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> i64 {
+    serial::serial_write_str("[kernel] Process exited with code: ");
+    let mut buf: [u8; 32] = [0; 32];
+    let mut f: fmt::Fmt = fmt::Fmt::new(buf.as_mut_ptr(), 32);
+    f.write_u64(code);
+    serial::serial_write_str(f.as_cstr());
+    serial::serial_write_byte('\n');
+    // In a real kernel: mark current process zombie, schedule next
+    loop { unsafe { asm!("hlt"); } }
+}
+
+fn sys_getpid(_a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> i64 {
+    // Return current process PID (1 = init process for now)
+    return 1;
+}
+
+// ── Init task: printed after all subsystems up ────────────────
+fn init_task(_arg: u64) -> void {
+    serial::serial_write_str("[init] Init task started.\n");
+    vga::vga_write_str("[init] Q+ kernel running. Type something:\n");
+
+    loop {
+        let ch: u8 = keyboard::keyboard_getchar();
+        vga::vga_putchar(ch as char);
+        serial::serial_write_byte(ch);
+    }
+}
+
+// ── kernel_main: called from boot.S ──────────────────────────
+#[no_mangle]
+pub fn kernel_main(_mb_magic: u64, _mb_info: u64) -> ! {
+    // 1. Initialize VGA text mode console
+    vga::vga_init();
+    vga::vga_write_str(BANNER);
+
+    // 2. Initialize serial port (COM1) for debug output
+    serial::serial_init();
+    serial::serial_write_str("[boot] Serial OK\n");
+
+    // 3. Initialize heap allocator (bump allocator over 16MB region)
+    // Physical address 0x400000..0x1400000 (16MB) reserved for kernel heap
+    allocator::init(0xFFFF_8000_0040_0000 as *mut u8, 16 * 1024 * 1024);
+    serial::serial_write_str("[boot] Allocator OK\n");
+
+    // 4. Set up IDT and install default handlers
+    interrupts::idt_init();
+    serial::serial_write_str("[boot] IDT OK\n");
+
+    // 5. Initialize PIT timer (1000 Hz tick)
+    timer::timer_init(1000);
+    serial::serial_write_str("[boot] Timer OK\n");
+
+    // 6. Register syscalls
+    syscall_table::init_syscalls();
+    syscall_table::register_syscall(syscall_table::SYS_WRITE,  sys_write);
+    syscall_table::register_syscall(syscall_table::SYS_EXIT,   sys_exit);
+    syscall_table::register_syscall(syscall_table::SYS_GETPID, sys_getpid);
+    serial::serial_write_str("[boot] Syscalls OK\n");
+
+    // 7. Enable interrupts
+    unsafe { asm!("sti"); }
+    serial::serial_write_str("[boot] Interrupts enabled\n");
+
+    // 8. Create init process
+    let init_proc: *mut process::Process = process::process_create(0, 0 /* reuse boot PML4 */, "init");
+    let init_thread: *mut process::Thread = process::thread_create(
+        unsafe { (*init_proc).pid },
+        init_task,
+        0,
+        5,
+    );
+    process::process_add_thread(init_proc, init_thread);
+    scheduler::sched_add(init_thread);
+    serial::serial_write_str("[boot] Init process created\n");
+
+    // 9. Start the scheduler (never returns)
+    serial::serial_write_str("[boot] Starting scheduler...\n");
+    scheduler::sched_start();
+
+    // Should never reach here
+    loop { unsafe { asm!("hlt"); } }
+}

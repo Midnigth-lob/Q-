@@ -1,0 +1,139 @@
+// Q+ Standard Library — PS/2 Keyboard Driver
+// module: qpstd::drivers::keyboard
+
+module qpstd::drivers::keyboard;
+
+import qpstd::cpu::regs;
+import qpstd::collections::ringbuffer;
+
+// ── I/O Ports ─────────────────────────────────────────────────
+pub const KB_DATA_PORT:    u16 = 0x60;
+pub const KB_STATUS_PORT:  u16 = 0x64;
+pub const KB_STATUS_OBF:   u8  = 0x01;  // Output buffer full
+
+// ── Key event ─────────────────────────────────────────────────
+pub enum KeyAction repr(u8) {
+    Press   = 0,
+    Release = 1,
+}
+
+pub struct KeyEvent {
+    scancode: u8,
+    action:   KeyAction,
+    ascii:    u8,   // 0 if no ASCII mapping
+}
+
+// ── Scancode → ASCII table (US QWERTY, Set 1) ─────────────────
+static SCANCODE_MAP: [u8; 128] = [
+    // 0x00..0x0F
+    0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 8, 9,
+    // 0x10..0x1F
+    'q','w','e','r','t','y','u','i','o','p','[',']', 10, 0, 'a','s',
+    // 0x20..0x2F
+    'd','f','g','h','j','k','l',';','\'','`', 0,'\\','z','x','c','v',
+    // 0x30..0x3F
+    'b','n','m',',','.','/', 0,'*', 0, ' ', 0, 0, 0, 0, 0, 0,
+    // 0x40..0x4F
+    0, 0, 0, 0, 0, 0, 0,'7','8','9','-','4','5','6','+','1',
+    // 0x50..0x5F
+    '2','3','0','.', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    // 0x60..0x7F (most unhandled)
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+];
+
+// ── Keyboard state ─────────────────────────────────────────────
+pub struct Keyboard {
+    event_buf: ringbuffer::RingBuffer<KeyEvent, 64>,
+    shift_held: bool,
+    ctrl_held:  bool,
+    alt_held:   bool,
+}
+
+impl Keyboard {
+    pub fn new() -> Keyboard {
+        return Keyboard {
+            event_buf:  ringbuffer::RingBuffer::new(),
+            shift_held: false,
+            ctrl_held:  false,
+            alt_held:   false,
+        };
+    }
+
+    // Called from the keyboard IRQ handler (IRQ1)
+    pub fn handle_irq(self: &mut Self) -> void {
+        // Check that data is available
+        let status: u8 = regs::inb(KB_STATUS_PORT);
+        if status & KB_STATUS_OBF == 0 { return; }
+
+        let sc: u8 = regs::inb(KB_DATA_PORT);
+        let release: bool = (sc & 0x80) != 0;
+        let code: u8 = sc & 0x7F;
+
+        let action: KeyAction = if release { KeyAction::Release } else { KeyAction::Press };
+
+        // Track modifier keys
+        match code {
+            0x2A | 0x36 => { self.shift_held = !release; return; }  // Shift L/R
+            0x1D        => { self.ctrl_held  = !release; return; }  // Ctrl
+            0x38        => { self.alt_held   = !release; return; }  // Alt
+            _ => {}
+        }
+
+        // Map scancode to ASCII
+        let ascii: u8 = if code < 128 { SCANCODE_MAP[code as usize] } else { 0 };
+        let ascii_final: u8 = if self.shift_held && ascii >= 'a' && ascii <= 'z' {
+            ascii - 32  // uppercase
+        } else {
+            ascii
+        };
+
+        let ev: KeyEvent = KeyEvent { scancode: code, action: action, ascii: ascii_final };
+        self.event_buf.push(ev);
+    }
+
+    // Poll for next key event (non-blocking)
+    pub fn poll(self: &mut Self) -> Option<KeyEvent> {
+        return self.event_buf.pop();
+    }
+
+    // Blocking read of next ASCII character (spins until available)
+    pub fn getchar(self: &mut Self) -> u8 {
+        loop {
+            match self.event_buf.peek() {
+                Some(ev) => {
+                    if ev.action == KeyAction::Press && ev.ascii != 0 {
+                        self.event_buf.pop();
+                        return ev.ascii;
+                    } else {
+                        self.event_buf.pop();
+                    }
+                }
+                None => {
+                    unsafe { asm!("hlt"); }
+                }
+            }
+        }
+    }
+}
+
+// ── Global singleton (initialized by kernel) ──────────────────
+static mut KEYBOARD: Keyboard = Keyboard {
+    event_buf:  ringbuffer::RingBuffer { buf: [KeyEvent{scancode:0,action:KeyAction::Press,ascii:0}; 64], head: 0, tail: 0, len: 0 },
+    shift_held: false,
+    ctrl_held:  false,
+    alt_held:   false,
+};
+
+#[no_mangle]
+pub fn keyboard_irq_handler() -> void {
+    unsafe { KEYBOARD.handle_irq(); }
+}
+
+pub fn keyboard_getchar() -> u8 {
+    unsafe { return KEYBOARD.getchar(); }
+}
+
+pub fn keyboard_poll() -> Option<KeyEvent> {
+    unsafe { return KEYBOARD.poll(); }
+}

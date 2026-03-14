@@ -1,0 +1,42 @@
+// Q+ Standard Library — PIT Timer Driver (8253/8254)
+// module: qpstd::drivers::timer
+
+module qpstd::drivers::timer;
+
+pub const PIT_CHANNEL0: u16 = 0x40;
+pub const PIT_CHANNEL1: u16 = 0x41;
+pub const PIT_CHANNEL2: u16 = 0x42;
+pub const PIT_CMD:      u16 = 0x43;
+pub const PIT_BASE_HZ:  u32 = 1193182;  // PIT input frequency
+
+pub static mut TICKS: u64 = 0;
+
+pub driver PitTimer {
+    pub hz: u32,
+
+    pub fn init(hz: u32) -> PitTimer {
+        let divisor: u32 = PIT_BASE_HZ / hz;
+        unsafe {
+            port::out_u8(PIT_CMD, 0x36);                           // Ch0, lobyte/hibyte, square wave mode
+            port::out_u8(PIT_CHANNEL0, (divisor & 0xFF) as u8);   // Low byte
+            port::out_u8(PIT_CHANNEL0, ((divisor >> 8) & 0xFF) as u8); // High byte
+        }
+        return PitTimer { hz: hz };
+    }
+
+    #[irq_handler]
+    interrupt fn tick(self: &mut Self) -> void {
+        unsafe { TICKS += 1; }
+        // Send EOI to PIC
+        unsafe { port::out_u8(0x20, 0x20); }
+    }
+
+    pub fn ticks() -> u64 {
+        return unsafe { TICKS };
+    }
+
+    pub fn sleep_ms(ms: u64) -> void {
+        let end: u64 = unsafe { TICKS } + ms;
+        while unsafe { TICKS } < end {}
+    }
+}

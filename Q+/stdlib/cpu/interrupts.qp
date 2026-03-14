@@ -1,0 +1,159 @@
+// Q+ Standard Library — Interrupts & IDT (x86-64)
+// module: qpstd::cpu::interrupts
+
+module qpstd::cpu::interrupts;
+
+// ── CPU flags ────────────────────────────────────────────────────
+
+pub fn enable_interrupts() -> void {
+    unsafe { asm!("sti"); }
+}
+
+pub fn disable_interrupts() -> void {
+    unsafe { asm!("cli"); }
+}
+
+pub fn halt() -> void {
+    unsafe { asm!("hlt"); }
+}
+
+// ── Interrupt Frame (pushed by CPU on interrupt entry) ───────────
+
+#[repr(C)]
+pub struct InterruptFrame {
+    pub ip:     u64,   // Instruction pointer
+    pub cs:     u64,   // Code segment
+    pub flags:  u64,   // RFLAGS
+    pub sp:     u64,   // Stack pointer
+    pub ss:     u64,   // Stack segment
+}
+
+// ── IDT Entry formats ────────────────────────────────────────────
+
+pub const IDT_TYPE_INTERRUPT: u8 = 0x8E;  // Present, DPL=0, 64-bit interrupt gate
+pub const IDT_TYPE_TRAP:      u8 = 0x8F;  // Present, DPL=0, 64-bit trap gate
+pub const IDT_TYPE_USER:      u8 = 0xEE;  // Present, DPL=3, for syscalls
+
+#[repr(C, packed)]
+pub struct IdtEntry {
+    offset_low:  u16,
+    selector:    u16,
+    ist:         u8,
+    type_attr:   u8,
+    offset_mid:  u16,
+    offset_high: u32,
+    zero:        u32,
+}
+
+impl IdtEntry {
+    pub fn new(handler: usize, selector: u16, gate_type: u8) -> IdtEntry {
+        return IdtEntry {
+            offset_low:  (handler & 0xFFFF) as u16,
+            selector:    selector,
+            ist:         0,
+            type_attr:   gate_type,
+            offset_mid:  ((handler >> 16) & 0xFFFF) as u16,
+            offset_high: ((handler >> 32) & 0xFFFFFFFF) as u32,
+            zero:        0,
+        };
+    }
+
+    pub fn missing() -> IdtEntry {
+        return IdtEntry {
+            offset_low: 0, selector: 0, ist: 0,
+            type_attr: 0, offset_mid: 0, offset_high: 0, zero: 0,
+        };
+    }
+}
+
+// ── IDT Descriptor (for LIDT instruction) ───────────────────────
+
+#[repr(C, packed)]
+pub struct Idtr {
+    pub limit: u16,   // size - 1
+    pub base:  u64,   // linear address of IDT
+}
+
+pub fn load_idt(idtr: &Idtr) -> void {
+    unsafe { asm!("lidt [rax]", idtr as usize as u64); }
+}
+
+// ── IDT table (256 entries) ──────────────────────────────────────
+
+pub struct Idt {
+    entries: [IdtEntry; 256],
+}
+
+impl Idt {
+    pub fn new() -> Idt {
+        // Cannot use array initializer with non-Copy type here, zero manually
+        return Idt { entries: [IdtEntry::missing(); 256] };
+    }
+
+    pub fn set_handler(self: &mut Self, vector: u8, handler: usize) -> void {
+        self.entries[vector as usize] = IdtEntry::new(handler, 0x08, IDT_TYPE_INTERRUPT);
+    }
+
+    pub fn set_trap(self: &mut Self, vector: u8, handler: usize) -> void {
+        self.entries[vector as usize] = IdtEntry::new(handler, 0x08, IDT_TYPE_TRAP);
+    }
+
+    pub fn load(self: &Self) -> void {
+        let idtr = Idtr {
+            limit: (256 * 16 - 1) as u16,
+            base:  self as usize as u64,
+        };
+        load_idt(&idtr);
+    }
+}
+
+// ── Standard exception vectors ───────────────────────────────────
+
+pub const EXC_DIVIDE_ERROR:       u8 = 0;
+pub const EXC_DEBUG:              u8 = 1;
+pub const EXC_NMI:                u8 = 2;
+pub const EXC_BREAKPOINT:         u8 = 3;
+pub const EXC_OVERFLOW:           u8 = 4;
+pub const EXC_BOUND_RANGE:        u8 = 5;
+pub const EXC_INVALID_OPCODE:     u8 = 6;
+pub const EXC_DEVICE_NOT_AVAIL:   u8 = 7;
+pub const EXC_DOUBLE_FAULT:       u8 = 8;
+pub const EXC_INVALID_TSS:        u8 = 10;
+pub const EXC_SEGMENT_NOT_PRES:   u8 = 11;
+pub const EXC_STACK_FAULT:        u8 = 12;
+pub const EXC_GPF:                u8 = 13;
+pub const EXC_PAGE_FAULT:         u8 = 14;
+pub const EXC_FP_EXCEPTION:       u8 = 16;
+pub const EXC_ALIGNMENT_CHECK:    u8 = 17;
+pub const EXC_MACHINE_CHECK:      u8 = 18;
+pub const EXC_SIMD_FP:            u8 = 19;
+
+// ── PIC (8259) remapping ─────────────────────────────────────────
+
+pub const PIC1_CMD:  u16 = 0x20;
+pub const PIC1_DATA: u16 = 0x21;
+pub const PIC2_CMD:  u16 = 0xA0;
+pub const PIC2_DATA: u16 = 0xA1;
+pub const PIC_EOI:   u8  = 0x20;
+
+pub fn pic_remap(offset1: u8, offset2: u8) -> void {
+    unsafe {
+        port::out_u8(PIC1_CMD,  0x11);  // Init
+        port::out_u8(PIC2_CMD,  0x11);
+        port::out_u8(PIC1_DATA, offset1);
+        port::out_u8(PIC2_DATA, offset2);
+        port::out_u8(PIC1_DATA, 0x04);  // Master has slave at IRQ2
+        port::out_u8(PIC2_DATA, 0x02);
+        port::out_u8(PIC1_DATA, 0x01);  // 8086 mode
+        port::out_u8(PIC2_DATA, 0x01);
+        port::out_u8(PIC1_DATA, 0x00);  // Unmask all
+        port::out_u8(PIC2_DATA, 0x00);
+    }
+}
+
+pub fn pic_send_eoi(irq: u8) -> void {
+    if irq >= 8 {
+        unsafe { port::out_u8(PIC2_CMD, PIC_EOI); }
+    }
+    unsafe { port::out_u8(PIC1_CMD, PIC_EOI); }
+}
